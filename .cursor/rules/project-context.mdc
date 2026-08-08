@@ -1,0 +1,22 @@
+---
+description: Project context — personal CC:Tweaked scripts for TerraFirmaGreg Modern
+alwaysApply: true
+---
+
+# Project context
+
+This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (ComputerCraft Tweaked) used **inside** the [TerraFirmaGreg Modern](https://github.com/TerraFirmaGreg-Team/Modpack-Modern/) modpack — not contribution to the modpack itself.
+
+## Environment
+
+- Minecraft **1.20.1**, Forge/NeoForge pack: TerraFirmaCraft + GregTech Modern (+ Create/Greate, AE2, Ad Astra, etc.)
+- Runtime: computers / turtles / pocket computers from **CC: Tweaked**
+- Pack may include GregTech peripherals and UTF-8 support for ComputerCraft — prefer APIs and peripherals available in TFG, not vanilla-only assumptions
+
+## How to write code
+
+- Target **CC: Tweaked Lua** (Lua 5.2-style subset used by CC), not general Lua/LuaJIT desktop apps
+- Prefer clear, practical scripts for factory automation, monitoring, logistics, and GT/TFC integration in-world
+- Keep scripts self-contained or with simple `require` modules suitable for copying onto computers in-game
+- Do not treat this as pack KubeJS/config work unless the user asks
+- Keep craft/transfer helpers inventory-agnostic: callers pass peripheral names (`from` / `out` / `machine`), never hard-code specific storage blocks
