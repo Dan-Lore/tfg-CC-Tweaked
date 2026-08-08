@@ -108,9 +108,27 @@ function recipes.parseLine(line, lineNo)
     }
 end
 
-function recipes.load(path)
+local function resolvePath(path)
     path = path or "recipes.cfg"
-    local file = assert(fs.open(path, "r"), "Cannot open " .. path)
+    if path:sub(1, 1) == "/" then
+        return path
+    end
+    local base = ""
+    if shell and shell.getRunningProgram then
+        local prog = shell.getRunningProgram()
+        if prog then
+            base = fs.getDir(prog)
+        end
+    end
+    return fs.combine(base, path)
+end
+
+function recipes.load(path)
+    path = resolvePath(path)
+    local file = fs.open(path, "r")
+    if not file then
+        error("Cannot open " .. path, 2)
+    end
     local list = {}
     local n = 0
 
