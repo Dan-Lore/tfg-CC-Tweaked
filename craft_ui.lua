@@ -26,6 +26,7 @@ local state = {
     scroll = 0,
     amount = 1,
     status = "Ready",
+    statusKind = "info", -- info | ok | error | busy
     busy = false,
 }
 
@@ -77,12 +78,66 @@ local function hitButton(x, y)
     return nil
 end
 
+local function statusLines()
+    if state.statusKind == "error" then
+        return 2
+    end
+    return 1
+end
+
 local function listWindow()
-    -- Title row 1, status row 2, list, bottom controls (2 rows)
-    local listTop = 3
+    -- Title row 1, status rows, list, bottom controls (2 rows)
+    local listTop = 2 + statusLines()
     local listBottom = H - 2
     local listH = math.max(1, listBottom - listTop + 1)
     return listTop, listH
+end
+
+local function setStatus(text, kind)
+    state.status = tostring(text or "")
+    state.statusKind = kind or "info"
+end
+
+--- Unwrap craft.request / craft.run error tables into a short monitor message.
+local function formatError(detail)
+    local function fromMissing(missing)
+        if not missing or not missing.name then
+            return nil
+        end
+        local name = short(missing.name)
+        local count = missing.count
+        if count and count > 1 then
+            return "NEED " .. name .. " x" .. tostring(count)
+        end
+        return "NEED " .. name
+    end
+
+    if type(detail) ~= "table" then
+        return tostring(detail)
+    end
+
+    local err = detail.error or detail
+    for _ = 1, 4 do
+        if type(err) ~= "table" then
+            break
+        end
+        local msg = fromMissing(err.missing)
+        if msg then
+            return msg
+        end
+        if err.error == "no_machine" then
+            return "NO MACHINE " .. short(err.missing and err.missing.name or err.item or "?")
+        end
+        if err.error == "cycle" then
+            return "CYCLE " .. short(err.missing and err.missing.name or "?")
+        end
+        if type(err.error) == "string" and not err.missing then
+            return err.error
+        end
+        err = err.error
+    end
+
+    return "CRAFT FAIL"
 end
 
 local function ensureVisible()
@@ -104,11 +159,36 @@ local function draw()
     local amtText = "x" .. tostring(state.amount)
     writeAt(W - #amtText + 1, 1, amtText, colors.white, colors.black)
 
-    local status = state.status
-    if #status > W then
-        status = status:sub(1, W)
+    local lines = statusLines()
+    local status = state.status or ""
+    local fg, bg = colors.lightGray, colors.black
+    if state.statusKind == "error" then
+        fg, bg = colors.white, colors.red
+    elseif state.statusKind == "ok" then
+        fg, bg = colors.black, colors.lime
+    elseif state.statusKind == "busy" then
+        fg, bg = colors.black, colors.yellow
     end
-    writeAt(1, 2, status, colors.lightGray, colors.black)
+
+    fill(1, 2, W, lines, bg)
+    if lines == 1 then
+        if #status > W then
+            status = status:sub(1, W)
+        end
+        writeAt(1, 2, status, fg, bg)
+    else
+        -- Two-line error banner: wrap by words / hard cut
+        local line1, line2 = status, ""
+        if #status > W then
+            line1 = status:sub(1, W)
+            line2 = status:sub(W + 1)
+            if #line2 > W then
+                line2 = line2:sub(1, W)
+            end
+        end
+        writeAt(1, 2, line1, fg, bg)
+        writeAt(1, 3, line2, fg, bg)
+    end
 
     local listTop, listH = listWindow()
     ensureVisible()
@@ -174,20 +254,20 @@ local function doCraft()
     end
     local entry = state.catalog[state.selected]
     if not entry then
-        state.status = "Nothing selected"
+        setStatus("Nothing selected", "error")
         draw()
         return
     end
 
     local storage = resolveStorage()
     if not storage then
-        state.status = "Set CONFIG.storage"
+        setStatus("Set CONFIG.storage", "error")
         draw()
         return
     end
 
     state.busy = true
-    state.status = "Crafting " .. short(entry.id) .. "..."
+    setStatus("Crafting " .. short(entry.id) .. "...", "busy")
     draw()
 
     local ok, detail = craft.request(entry.id, state.amount, {
@@ -198,19 +278,9 @@ local function doCraft()
 
     state.busy = false
     if ok then
-        state.status = "OK +" .. tostring(detail.produced)
+        setStatus("OK +" .. tostring(detail.produced), "ok")
     else
-        local err = detail
-        if type(detail) == "table" then
-            if detail.error and detail.error.missing then
-                err = "Need " .. short(detail.error.missing.name)
-            elseif detail.error and detail.error.error then
-                err = tostring(detail.error.error)
-            else
-                err = textutils.serialize(detail):sub(1, W)
-            end
-        end
-        state.status = tostring(err)
+        setStatus(formatError(detail), "error")
     end
     draw()
 end
@@ -259,9 +329,9 @@ local function main()
 
     local storage = resolveStorage()
     if storage then
-        state.status = "Store: " .. short(storage)
+        setStatus("Store: " .. short(storage), "info")
     else
-        state.status = "Set CONFIG.storage"
+        setStatus("Set CONFIG.storage", "error")
     end
 
     draw()
