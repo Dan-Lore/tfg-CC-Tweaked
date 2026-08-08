@@ -8,10 +8,10 @@ local craft = require("craft")
 
 local CONFIG = {
     monitor = "right",
-    -- Example: "tfg:ev_food_refrigerator_0"
-    storage = nil,
+    storage = "tfg:ev_food_refrigerator_0",
     textScale = 0.5,
     waitTicks = 100,
+    growDuration = 10, -- seconds for electric greenhouse grow steps
     maxAmount = 64,
 }
 
@@ -25,6 +25,7 @@ local state = {
     selected = 1,
     scroll = 0,
     amount = 1,
+    storageLabel = "",
     status = "Ready",
     statusKind = "info", -- info | ok | error | busy
     busy = false,
@@ -86,8 +87,8 @@ local function statusLines()
 end
 
 local function listWindow()
-    -- Title row 1, status rows, list, bottom controls (2 rows)
-    local listTop = 2 + statusLines()
+    -- Row 1 title, row 2 storage (always), then status, list, bottom controls
+    local listTop = 3 + statusLines()
     local listBottom = H - 2
     local listH = math.max(1, listBottom - listTop + 1)
     return listTop, listH
@@ -121,15 +122,19 @@ local function formatError(detail)
         if type(err) ~= "table" then
             break
         end
-        local msg = fromMissing(err.missing)
-        if msg then
-            return msg
-        end
+        -- Machine errors first (missing.name here is the machine id, not an item).
         if err.error == "no_machine" then
             return "NO MACHINE " .. short(err.missing and err.missing.name or err.item or "?")
         end
+        if err.error == "grow_failed" then
+            return "GROW FAIL " .. short(err.missing and err.missing.name or "?")
+        end
         if err.error == "cycle" then
             return "CYCLE " .. short(err.missing and err.missing.name or "?")
+        end
+        local msg = fromMissing(err.missing)
+        if msg then
+            return msg
         end
         if type(err.error) == "string" and not err.missing then
             return err.error
@@ -159,6 +164,14 @@ local function draw()
     local amtText = "x" .. tostring(state.amount)
     writeAt(W - #amtText + 1, 1, amtText, colors.white, colors.black)
 
+    -- Persistent storage line
+    local store = state.storageLabel
+    if #store > W then
+        store = store:sub(1, W)
+    end
+    fill(1, 2, W, 1, colors.gray)
+    writeAt(1, 2, store, colors.white, colors.gray)
+
     local lines = statusLines()
     local status = state.status or ""
     local fg, bg = colors.lightGray, colors.black
@@ -170,14 +183,14 @@ local function draw()
         fg, bg = colors.black, colors.yellow
     end
 
-    fill(1, 2, W, lines, bg)
+    local statusY = 3
+    fill(1, statusY, W, lines, bg)
     if lines == 1 then
         if #status > W then
             status = status:sub(1, W)
         end
-        writeAt(1, 2, status, fg, bg)
+        writeAt(1, statusY, status, fg, bg)
     else
-        -- Two-line error banner: wrap by words / hard cut
         local line1, line2 = status, ""
         if #status > W then
             line1 = status:sub(1, W)
@@ -186,8 +199,8 @@ local function draw()
                 line2 = line2:sub(1, W)
             end
         end
-        writeAt(1, 2, line1, fg, bg)
-        writeAt(1, 3, line2, fg, bg)
+        writeAt(1, statusY, line1, fg, bg)
+        writeAt(1, statusY + 1, line2, fg, bg)
     end
 
     local listTop, listH = listWindow()
@@ -274,6 +287,7 @@ local function doCraft()
         from = storage,
         out = storage,
         waitTicks = CONFIG.waitTicks,
+        growDuration = CONFIG.growDuration,
     })
 
     state.busy = false
@@ -329,8 +343,10 @@ local function main()
 
     local storage = resolveStorage()
     if storage then
-        setStatus("Store: " .. short(storage), "info")
+        state.storageLabel = "Store: " .. short(storage)
+        setStatus("Ready", "info")
     else
+        state.storageLabel = "Store: NONE"
         setStatus("Set CONFIG.storage", "error")
     end
 

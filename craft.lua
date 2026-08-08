@@ -1,13 +1,14 @@
--- Run `processing` / `craft` recipes from recipes.cfg.
--- Grow recipes are handled separately by on.lua.
+-- Run `processing` / `craft` / `grow` recipes from recipes.cfg.
 -- Storage peripherals are always passed by the caller — no hard-coded inventories.
 
 local transfer = require("transfer")
 local recipes = require("recipes")
+local greenhouse = require("greenhouse")
 
 local craft = {}
 
 local DEFAULT_CFG = "recipes.cfg"
+local DEFAULT_GROW_DURATION = 10 -- seconds
 
 --- Move all non-fluid inputs from inventory into the machine.
 -- Fluids must be handled by the caller (tanks / GT fluid hatches).
@@ -39,11 +40,19 @@ local function pullItems(from, to, stacks)
     return moved
 end
 
---- Load recipes and keep only craftable flags.
+--- Load recipes for the craft UI catalog (processing / craft only).
 function craft.load(path)
     local all = recipes.load(path or DEFAULT_CFG)
     return recipes.filter(all, function(r)
         return r.flag == "processing" or r.flag == "craft"
+    end)
+end
+
+--- Load recipes used by recursive request (includes grow).
+function craft.loadRequest(path)
+    local all = recipes.load(path or DEFAULT_CFG)
+    return recipes.filter(all, function(r)
+        return r.flag == "processing" or r.flag == "craft" or r.flag == "grow"
     end)
 end
 
@@ -85,7 +94,7 @@ function craft.run(recipe, opts)
     assert(opts and opts.from and opts.machine and opts.out, "opts.from, opts.machine, opts.out required")
 
     if recipe.flag == "grow" then
-        return false, "grow recipes belong in on.lua"
+        return false, "use craft.request for grow recipes"
     end
 
     local ok, moved, missing = pushItems(opts.from, opts.machine, recipe.inputs)
@@ -162,25 +171,100 @@ function craft.catalog(list)
     return catalog
 end
 
---- Resolve a physical machine peripheral for a recipe.
--- Tries recipe.machine, then recipe.base, then peripherals starting with base.
-function craft.resolveMachine(recipe)
-    if peripheral.isPresent(recipe.machine) then
-        return recipe.machine
+local function peripheralTypes(name)
+    local ok, ptype = pcall(peripheral.getType, name)
+    if not ok or not ptype then
+        return {}
     end
-    if peripheral.isPresent(recipe.base) then
-        return recipe.base
+    if type(ptype) == "table" then
+        return ptype
+    end
+    return { ptype }
+end
+
+local function typeMatchesRecipe(ptype, recipe)
+    if not ptype then
+        return false
+    end
+    ptype = tostring(ptype)
+    if ptype == recipe.machine or ptype == recipe.base then
+        return true
+    end
+    local shortBase = recipe.base:match("([^:]+)$") or recipe.base
+    if ptype:find(shortBase, 1, true) then
+        return true
+    end
+    -- grow recipes: any electric greenhouse peripheral type
+    if recipe.flag == "grow" and ptype:lower():find("electric_greenhouse", 1, true) then
+        return true
+    end
+    return false
+end
+
+local function nameMatchesRecipe(name, recipe)
+    if name == recipe.machine or name == recipe.base then
+        return true
     end
     local prefix = recipe.base .. "_"
+    if name:sub(1, #prefix) == prefix then
+        return true
+    end
+    local shortBase = recipe.base:match("([^:]+)$") or recipe.base
+    if name:find(shortBase, 1, true) then
+        return true
+    end
+    if recipe.flag == "grow" and name:lower():find("greenhouse", 1, true) then
+        return true
+    end
+    return false
+end
+
+--- Resolve a physical machine peripheral for a recipe.
+-- Recipe suffix _N is preferred (circuit / instance), but any matching
+-- greenhouse/machine on the network is accepted as fallback.
+function craft.resolveMachine(recipe)
     local names = peripheral.getNames()
-    table.sort(names)
+    local matches = {}
+
     for i = 1, #names do
         local name = names[i]
-        if name == recipe.base or name:sub(1, #prefix) == prefix then
-            return name
+        local matched = nameMatchesRecipe(name, recipe)
+        if not matched then
+            local types = peripheralTypes(name)
+            for j = 1, #types do
+                if typeMatchesRecipe(types[j], recipe) then
+                    matched = true
+                    break
+                end
+            end
+        end
+        if matched then
+            matches[#matches + 1] = name
         end
     end
-    return nil
+
+    if #matches == 0 then
+        return nil
+    end
+
+    -- Prefer exact recipe.machine, then same numeric suffix, then stable order.
+    for i = 1, #matches do
+        if matches[i] == recipe.machine then
+            return matches[i]
+        end
+    end
+
+    if recipe.circuit ~= nil then
+        local suffix = "_" .. tostring(recipe.circuit)
+        for i = 1, #matches do
+            if matches[i]:sub(-#suffix) == suffix then
+                return matches[i]
+            end
+        end
+    end
+
+    table.sort(matches)
+    return matches[1]
 end
 
 local function countItem(invName, itemName)
@@ -209,7 +293,29 @@ local function isCraftableName(name)
     return name and name:sub(1, 1) ~= "#"
 end
 
---- Ensure `amount` of itemId exists in storage, recursively crafting dependencies.
+local function runGrow(recipe, machine, opts)
+    local duration = opts.growDuration or DEFAULT_GROW_DURATION
+    local ok = greenhouse.runFor(machine, duration)
+    if not ok then
+        return false, {
+            error = "grow_failed",
+            missing = { name = machine, count = 1 },
+        }
+    end
+
+    local pullFrom = opts.pullFrom or machine
+    local outputs = pullItems(pullFrom, opts.out, recipe.outputs)
+    return true, {
+        inputs = {},
+        outputs = outputs,
+        machine = recipe.machine,
+        circuit = recipe.circuit,
+        flag = "grow",
+        duration = duration,
+    }
+end
+
+--- Ensure `amount` of itemId exists in storage, recursively crafting/growing dependencies.
 -- Fluids and tags are not auto-crafted.
 local function ensure(list, itemId, amount, opts, visiting, log)
     amount = math.max(0, math.floor(tonumber(amount) or 0))
@@ -262,21 +368,27 @@ local function ensure(list, itemId, amount, opts, visiting, log)
             end
         end
 
-        local ok, detail = craft.run(recipe, {
-            from = opts.from,
-            out = opts.out,
-            machine = machine,
-            pullFrom = opts.pullFrom,
-            waitTicks = opts.waitTicks,
-        })
+        local ok, detail
+        if recipe.flag == "grow" then
+            ok, detail = runGrow(recipe, machine, opts)
+        else
+            ok, detail = craft.run(recipe, {
+                from = opts.from,
+                out = opts.out,
+                machine = machine,
+                pullFrom = opts.pullFrom,
+                waitTicks = opts.waitTicks,
+            })
+        end
+
         if not ok then
-            -- Missing fluid/tag/etc. that we cannot recurse into.
             visiting[itemId] = nil
             return false, detail
         end
         log[#log + 1] = {
             item = itemId,
             machine = machine,
+            flag = recipe.flag,
             detail = detail,
         }
     end
@@ -294,23 +406,23 @@ local function ensure(list, itemId, amount, opts, visiting, log)
     return true
 end
 
---- Craft until at least `amount` of the output item is available.
--- Recursively crafts missing non-fluid, non-tag inputs from recipes.cfg.
--- opts.from / opts.out required. opts.machine optional (auto-resolved per recipe).
+--- Craft/grow until at least `amount` of the output item is available.
+-- Recursively resolves missing inputs via processing/craft/grow recipes.
+-- opts.from / opts.out required. opts.growDuration = greenhouse seconds (default 10).
 function craft.request(itemId, amount, opts)
     assert(opts and opts.from and opts.out, "opts.from and opts.out required")
     amount = math.max(1, math.floor(tonumber(amount) or 1))
 
-    local list = craft.load(opts.cfg)
+    local list = craft.loadRequest(opts.cfg)
     local before = countAvailable(opts, itemId)
     local log = {}
 
-    -- Don't pin opts.machine for the whole tree — each step resolves its own.
     local ensureOpts = {
         from = opts.from,
         out = opts.out,
         pullFrom = opts.pullFrom,
         waitTicks = opts.waitTicks,
+        growDuration = opts.growDuration,
         cfg = opts.cfg,
     }
 

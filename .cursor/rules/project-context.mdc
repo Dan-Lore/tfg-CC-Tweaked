@@ -20,3 +20,4 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - Keep scripts self-contained or with simple `require` modules suitable for copying onto computers in-game
 - Do not treat this as pack KubeJS/config work unless the user asks
 - Keep craft/transfer helpers inventory-agnostic: callers pass peripheral names (`from` / `out` / `machine`), never hard-code specific storage blocks
+- Greenhouse control lives in `greenhouse.lua`; `grow` recipes in `recipes.cfg` are started from recursive `craft.request`
