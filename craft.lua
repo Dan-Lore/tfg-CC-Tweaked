@@ -590,12 +590,12 @@ function craft.run(recipe, opts)
                     stallSleeps = 0
                 else
                     stallSleeps = stallSleeps + 1
-                    if setsPushed > 0 and stallSleeps > 2 then
-                        -- Stop feeding; wait for sets already in the machine.
+                    -- Be patient: parallel gather may still be topping up ingredients.
+                    if setsPushed > 0 and stallSleeps > 12 then
                         pushing = false
                         targetSets = setsPushed
                         rebuildNeed(targetSets)
-                    elseif setsPushed == 0 and stallSleeps > 4 then
+                    elseif setsPushed == 0 and stallSleeps > 20 then
                         return false, {
                             error = "missing_input",
                             missing = missing,
@@ -823,14 +823,8 @@ end
 local function runCraftBatch(recipe, machine, recipeKey, store, opts, itemId, amount, outStack, log, times)
     times = math.max(1, math.floor(tonumber(times) or 1))
     local ok, detail = withMachineLock(machine, recipeKey, function()
-        local haveNow = countAvailable(store, itemId, opts)
-        local needNow = amount - haveNow
-        if needNow <= 0 then
-            return true, { skipped = true }
-        end
-        local runsNow = math.ceil(needNow / outStack.count)
         local readyNow = countCompleteSets(recipe, store, opts)
-        local n = math.min(times, runsNow, readyNow)
+        local n = math.min(times, readyNow)
         if n <= 0 then
             return true, { skipped = true }
         end
@@ -875,8 +869,8 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
     end
 
     local store = opts.store
-    local have = countAvailable(store, itemId, opts)
-    local need = amount - have
+    local before = countAvailable(store, itemId, opts)
+    local need = amount - before
     if need <= 0 then
         return true
     end
@@ -914,10 +908,29 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
 
     visiting[itemId] = true
     local recipeKey = recipes.recipeKey(recipe)
+    local produced = 0
 
     local function fail(err)
         visiting[itemId] = nil
         return false, err
+    end
+
+    local function noteProduced(detail, fallbackSets)
+        local sets = fallbackSets or 0
+        if detail and not detail.skipped then
+            sets = tonumber(detail.sets_pushed) or tonumber(detail.times) or sets
+        end
+        if sets > 0 then
+            produced = produced + sets * outStack.count
+        end
+    end
+
+    -- Production-based success: a parallel parent (oven) may consume intermediates.
+    local function fulfilled()
+        if produced >= need then
+            return true
+        end
+        return countAvailable(store, itemId, opts) >= amount
     end
 
     if recipe.flag == "grow" then
@@ -926,8 +939,7 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
             if cancelled and cancelled[1] then
                 return fail(cancelled[2])
             end
-            have = countAvailable(store, itemId, opts)
-            if have >= amount then
+            if fulfilled() then
                 break
             end
 
@@ -946,7 +958,7 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
             end
 
             local ok, detail = withMachineLock(machine, recipeKey, function()
-                if countAvailable(store, itemId, opts) >= amount then
+                if fulfilled() then
                     return true, { skipped = true }
                 end
                 return runGrow(recipe, machine, opts)
@@ -955,6 +967,7 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
                 return fail(detail)
             end
             if detail and not detail.skipped then
+                noteProduced(detail, 1)
                 log[#log + 1] = {
                     item = itemId,
                     machine = machine,
@@ -964,9 +977,7 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
             end
         end
     else
-        -- Pipeline: craft every balanced pack that is ready (min across ingredients);
-        -- gather only the next missing set while a consumer crafts in parallel when possible.
-        local stop = { false, nil } -- failed err
+        local stop = { false, nil }
         local function shouldStop()
             if stop[1] then
                 return true
@@ -976,25 +987,48 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
                 stop[2] = cancelled[2]
                 return true
             end
-            return countAvailable(store, itemId, opts) >= amount
+            return fulfilled()
+        end
+
+        local function remainingRuns()
+            if fulfilled() then
+                return 0
+            end
+            local byProd = math.ceil((need - produced) / outStack.count)
+            local haveOut = countAvailable(store, itemId, opts)
+            local byStock = math.max(0, math.ceil((amount - haveOut) / outStack.count))
+            return math.max(byProd, byStock)
+        end
+
+        local function handleBatchResult(ok, detail)
+            if detail then
+                noteProduced(detail, 0)
+            end
+            if ok then
+                return true
+            end
+            -- Partial oneshot progress: keep going for the rest.
+            if detail and detail.error == "craft_short" and not fulfilled() then
+                return true
+            end
+            stop[1] = true
+            stop[2] = detail
+            return false
         end
 
         local function consumerCraft()
             while not shouldStop() do
-                local haveOut = countAvailable(store, itemId, opts)
-                local remainingRuns = math.ceil((amount - haveOut) / outStack.count)
-                if remainingRuns <= 0 then
+                local rem = remainingRuns()
+                if rem <= 0 then
                     return
                 end
                 local ready = countCompleteSets(recipe, store, opts)
-                local n = math.min(ready, remainingRuns)
+                local n = math.min(ready, rem)
                 if n > 0 then
                     local ok, detail = runCraftBatch(
                         recipe, machine, recipeKey, store, opts, itemId, amount, outStack, log, n
                     )
-                    if not ok then
-                        stop[1] = true
-                        stop[2] = detail
+                    if not handleBatchResult(ok, detail) then
                         return
                     end
                 else
@@ -1005,20 +1039,15 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
 
         local function producerGather()
             while not shouldStop() do
-                local haveOut = countAvailable(store, itemId, opts)
-                local remainingRuns = math.ceil((amount - haveOut) / outStack.count)
-                if remainingRuns <= 0 then
+                local rem = remainingRuns()
+                if rem <= 0 then
                     return
                 end
                 local ready = countCompleteSets(recipe, store, opts)
-                if ready >= remainingRuns then
-                    -- Enough full packs for the consumer to finish alone.
+                if ready >= rem then
                     sleep(0.25)
                 else
-                    -- Top up toward one more pack than currently ready so crafting
-                    -- (e.g. raw pizza) continues while the consumer uses ready packs
-                    -- (e.g. oven). Never ask past remainingRuns.
-                    local wantSets = math.min(remainingRuns, ready + 1)
+                    local wantSets = math.min(rem, ready + 1)
                     local okIn, errIn = ensureInputsParallel(
                         list, recipe, wantSets, opts, visiting, log, cancelled
                     )
@@ -1027,9 +1056,7 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
                         stop[2] = errIn
                         return
                     end
-                    if countCompleteSets(recipe, store, opts) < 1
-                        and not shouldStop()
-                    then
+                    if countCompleteSets(recipe, store, opts) < 1 and not shouldStop() then
                         local stillMissing = findMissingInputs(recipe, store, opts, 1)
                         if #stillMissing > 0 then
                             stop[1] = true
@@ -1049,20 +1076,18 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
         if recipeHasCraftableInputs(recipe) then
             parallel.waitForAll(producerGather, consumerCraft)
         else
-            -- Only crates/fluids: wait for packs by min, then craft.
             while not shouldStop() do
-                local haveOut = countAvailable(store, itemId, opts)
-                local remainingRuns = math.ceil((amount - haveOut) / outStack.count)
-                if remainingRuns <= 0 then
+                local rem = remainingRuns()
+                if rem <= 0 then
                     break
                 end
                 local ready = countCompleteSets(recipe, store, opts)
-                local n = math.min(ready, remainingRuns)
+                local n = math.min(ready, rem)
                 if n > 0 then
                     local ok, detail = runCraftBatch(
                         recipe, machine, recipeKey, store, opts, itemId, amount, outStack, log, n
                     )
-                    if not ok then
+                    if not handleBatchResult(ok, detail) then
                         return fail(detail)
                     end
                 else
@@ -1086,11 +1111,10 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
 
     visiting[itemId] = nil
 
-    have = countAvailable(store, itemId, opts)
-    if have < amount then
+    if not fulfilled() then
         return false, {
             error = "craft_short",
-            missing = { name = itemId, count = amount - have },
+            missing = { name = itemId, count = math.max(1, need - produced) },
         }
     end
 
