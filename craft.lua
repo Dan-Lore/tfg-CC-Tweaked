@@ -239,20 +239,29 @@ local function outputDest(store, recipe, itemName, fallbackOut)
     return store.destFor(itemName) or fallbackOut
 end
 
+--- Pull up to `amount` of one item into route-aware destinations.
+local function pullItemAmount(from, itemName, amount, store, fallbackOut, recipe)
+    if amount <= 0 then
+        return 0
+    end
+    local dest = outputDest(store, recipe, itemName, fallbackOut)
+    local n = transfer(from, dest, itemName, amount)
+    if store and n < amount then
+        local overflow = store.overflow()
+        if overflow and overflow ~= dest and peripheral.isPresent(overflow) then
+            n = n + transfer(from, overflow, itemName, amount - n)
+        end
+    end
+    return n
+end
+
 --- Pull recipe outputs into per-item destinations (route-aware).
 local function pullOutputs(from, stacks, store, fallbackOut, recipe)
     local moved = {}
     for i = 1, #stacks do
         local stack = stacks[i]
         if not stack.fluid then
-            local dest = outputDest(store, recipe, stack.name, fallbackOut)
-            local n = transfer(from, dest, stack.name, stack.count)
-            if store and n < stack.count then
-                local overflow = store.overflow()
-                if overflow and overflow ~= dest and peripheral.isPresent(overflow) then
-                    n = n + transfer(from, overflow, stack.name, stack.count - n)
-                end
-            end
+            local n = pullItemAmount(from, stack.name, stack.count, store, fallbackOut, recipe)
             moved[stack.name] = (moved[stack.name] or 0) + n
         end
     end
@@ -269,30 +278,61 @@ local function craftWaitTimeout(opts, times)
     return base * times
 end
 
-local function waitForOutputs(pullFrom, outputs, beforeCounts, timeout)
+--- Drain machine outputs while waiting so GT output slots never fill and stall the craft.
+-- Returns ok, pulledTotals (name -> count).
+local function waitAndDrainOutputs(pullFrom, outputs, store, fallbackOut, recipe, timeout)
+    local need = {}
+    local pulled = {}
+    local anyItem = false
+    for i = 1, #outputs do
+        local o = outputs[i]
+        if not o.fluid then
+            anyItem = true
+            need[o.name] = (need[o.name] or 0) + o.count
+            pulled[o.name] = 0
+        end
+    end
+    if not anyItem then
+        return true, pulled
+    end
+
     local deadline = os.clock() + timeout
     while os.clock() < deadline do
-        local ready = true
-        local anyItem = false
-        for i = 1, #outputs do
-            local o = outputs[i]
-            if not o.fluid then
-                anyItem = true
-                if countItem(pullFrom, o.name) < (beforeCounts[o.name] or 0) + o.count then
-                    ready = false
-                    break
+        local complete = true
+        for name, want in pairs(need) do
+            local remaining = want - pulled[name]
+            if remaining > 0 then
+                local n = pullItemAmount(pullFrom, name, remaining, store, fallbackOut, recipe)
+                pulled[name] = pulled[name] + n
+                if pulled[name] < want then
+                    complete = false
                 end
             end
         end
-        if anyItem and ready then
-            return true
-        end
-        if not anyItem then
-            return true
+        if complete then
+            return true, pulled
         end
         sleep(0.5)
     end
-    return false
+
+    -- Final drain attempt before reporting timeout.
+    for name, want in pairs(need) do
+        local remaining = want - pulled[name]
+        if remaining > 0 then
+            pulled[name] = pulled[name] + pullItemAmount(
+                pullFrom, name, remaining, store, fallbackOut, recipe
+            )
+        end
+    end
+
+    local complete = true
+    for name, want in pairs(need) do
+        if pulled[name] < want then
+            complete = false
+            break
+        end
+    end
+    return complete, pulled
 end
 
 function craft.load(path)
@@ -367,30 +407,36 @@ function craft.run(recipe, opts)
     end
 
     local pullFrom = opts.pullFrom or opts.machine
-    local beforeCounts = {}
-    for i = 1, #outputs do
-        local o = outputs[i]
-        if not o.fluid then
-            beforeCounts[o.name] = countItem(pullFrom, o.name)
-        end
-    end
-
     local timeout = craftWaitTimeout(opts, times)
-    local ready = waitForOutputs(pullFrom, outputs, beforeCounts, timeout)
+    local ready, pulled = waitAndDrainOutputs(
+        pullFrom, outputs, store, out, recipe, timeout
+    )
     if not ready then
-        local primary = outputs[1]
+        local shortName, shortCount = nil, 0
+        for name, got in pairs(pulled) do
+            local want = 0
+            for i = 1, #outputs do
+                if not outputs[i].fluid and outputs[i].name == name then
+                    want = want + outputs[i].count
+                end
+            end
+            local left = want - got
+            if left > shortCount then
+                shortName = name
+                shortCount = left
+            end
+        end
         return false, {
             error = "craft_timeout",
-            missing = primary and {
-                name = primary.name,
-                count = primary.count,
-            } or { name = recipe.machine, count = 1 },
-            hint = "machine did not finish in time (check power/circuit/fluids)",
+            missing = {
+                name = shortName or (outputs[1] and outputs[1].name) or recipe.machine,
+                count = shortCount > 0 and shortCount or 1,
+            },
+            outputs = pulled,
+            hint = "machine stalled or timed out (output slots / power / circuit)",
             times = times,
         }
     end
-
-    local pulled = pullOutputs(pullFrom, outputs, store, out, recipe)
 
     return true, {
         inputs = moved,
