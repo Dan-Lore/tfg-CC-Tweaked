@@ -33,6 +33,7 @@ local function emptyConfig()
     return {
         named = {},
         sources = {},
+        fluids = {}, -- key -> { peripheral, fluid }
         seeds = {},
         routes = {},
         settings = {},
@@ -68,6 +69,17 @@ local function parseLine(cfg, line, lineNo)
             error(("storage.cfg line %s: source | item | peripheral"):format(tostring(lineNo)))
         end
         cfg.sources[parts[2]] = parts[3]
+        return
+    end
+
+    if key == "fluid_source" then
+        if #parts < 4 then
+            error(("storage.cfg line %s: fluid_source | tagOrFluid | tank | concreteFluid"):format(tostring(lineNo)))
+        end
+        cfg.fluids[parts[2]] = {
+            peripheral = parts[3],
+            fluid = parts[4],
+        }
         return
     end
 
@@ -156,6 +168,11 @@ function storage.load(path)
 
     function cfg.sourceOf(itemId)
         return cfg.sources[itemId] or cfg.named.main
+    end
+
+    --- @return { peripheral, fluid } | nil
+    function cfg.fluidSourceOf(fluidOrTag)
+        return cfg.fluids[fluidOrTag]
     end
 
     function cfg.destFor(itemId)

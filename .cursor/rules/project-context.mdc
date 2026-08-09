@@ -26,3 +26,4 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - `greenhouse_clean.lua` is autonomous — any computer with configs + peripheral network; not tied to `craft_ui`; keeps GH off and only empties buses
 - Non-fridge items (e.g. `firmalife:spice/basil_leaves`) use `route` → `overflow` in `storage.cfg`; cleaner drains overflow first
 - Greenhouse products are pulled from `output_bus_prefix` + circuit (default `gtceu:mv_output_bus_N`), not from the greenhouse controller block
+- Fluids use `fluid_source | tagOrFluid | tank | concreteFluid` in `storage.cfg` (e.g. `#tfg:clean_water` → `gtceu:lv_super_tank_1` / `minecraft:water`); craft refuses to start if any input (item or fluid) is missing

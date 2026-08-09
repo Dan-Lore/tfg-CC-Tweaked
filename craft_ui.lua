@@ -99,11 +99,29 @@ local function setStatus(text, kind)
 end
 
 local function formatError(detail)
+    local function prettyName(name)
+        if not name then
+            return "?"
+        end
+        name = name:gsub("^#", "")
+        return short(name)
+    end
+
     local function fromMissing(missing)
         if not missing or not missing.name then
             return nil
         end
-        local name = short(missing.name)
+        local name = prettyName(missing.name)
+        if missing.fluid then
+            if missing.error == "no_fluid_source" then
+                return "NO TANK " .. name
+            end
+            local count = missing.count
+            if count and count > 0 then
+                return "NEED " .. name .. " " .. tostring(count) .. "mb"
+            end
+            return "NEED " .. name
+        end
         local count = missing.count
         if count and count > 1 then
             return "NEED " .. name .. " x" .. tostring(count)
@@ -121,16 +139,40 @@ local function formatError(detail)
             break
         end
         if err.error == "no_machine" then
-            return "NO MACHINE " .. short(err.missing and err.missing.name or err.item or "?")
+            return "NO MACHINE " .. prettyName(err.missing and err.missing.name or err.item or "?")
         end
         if err.error == "grow_failed" then
-            return "GROW FAIL " .. short(err.missing and err.missing.name or "?")
+            return "GROW FAIL " .. prettyName(err.missing and err.missing.name or "?")
         end
         if err.error == "grow_timeout" then
-            return "GROW WAIT " .. short(err.missing and err.missing.name or "?")
+            return "GROW WAIT " .. prettyName(err.missing and err.missing.name or "?")
+        end
+        if err.error == "craft_no_output" then
+            return "NO OUT " .. prettyName(err.missing and err.missing.name or "?")
         end
         if err.error == "cycle" then
-            return "CYCLE " .. short(err.missing and err.missing.name or "?")
+            return "CYCLE " .. prettyName(err.missing and err.missing.name or "?")
+        end
+        -- Prefer fluid failures (often the real blocker) over mid-chain items.
+        if type(err.missing_all) == "table" then
+            for i = 1, #err.missing_all do
+                if err.missing_all[i].fluid then
+                    local msg = fromMissing(err.missing_all[i])
+                    if msg then
+                        return msg
+                    end
+                end
+            end
+            if err.missing_all[1] then
+                local msg = fromMissing(err.missing_all[1])
+                if msg then
+                    local extra = #err.missing_all - 1
+                    if extra > 0 then
+                        return msg .. " +" .. tostring(extra)
+                    end
+                    return msg
+                end
+            end
         end
         local msg = fromMissing(err.missing)
         if msg then

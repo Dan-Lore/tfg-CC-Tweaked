@@ -59,12 +59,120 @@ local function countAvailable(store, itemName, opts)
     return total
 end
 
---- Pull inputs from per-item sources into the machine.
-local function pushItems(stacks, machine, store, fallbackFrom)
+local function isCraftableName(name)
+    return name and name:sub(1, 1) ~= "#"
+end
+
+local function countFluidAvailable(store, fluidOrTag)
+    if not store then
+        return 0, nil
+    end
+    local info = store.fluidSourceOf(fluidOrTag)
+    if not info or not info.peripheral or not info.fluid then
+        return 0, nil
+    end
+    if not peripheral.isPresent(info.peripheral) then
+        return 0, info
+    end
+    return transfer.countFluid(info.peripheral, info.fluid), info
+end
+
+--- List missing inputs for one craft run (items + fluids). Does not recurse.
+-- Fluids are listed first so UI/errors surface tank issues before mid-chain items.
+local function findMissingInputs(recipe, store, opts)
+    local fluids = {}
+    local items = {}
+    for i = 1, #recipe.inputs do
+        local input = recipe.inputs[i]
+        if input.fluid then
+            local have, info = countFluidAvailable(store, input.name)
+            if not info then
+                fluids[#fluids + 1] = {
+                    name = input.name,
+                    count = input.count,
+                    fluid = true,
+                    error = "no_fluid_source",
+                }
+            elseif have < input.count then
+                fluids[#fluids + 1] = {
+                    name = input.name,
+                    count = input.count - have,
+                    fluid = true,
+                }
+            end
+        elseif isCraftableName(input.name) then
+            local have = countAvailable(store, input.name, opts)
+            if have < input.count then
+                items[#items + 1] = {
+                    name = input.name,
+                    count = input.count - have,
+                    fluid = false,
+                }
+            end
+        else
+            -- Item tags (#...) are not auto-resolved; report as missing unless sourced.
+            local from = store and store.sourceOf(input.name)
+            local have = (from and countItem(from, input.name)) or 0
+            if have < input.count then
+                items[#items + 1] = {
+                    name = input.name,
+                    count = input.count - have,
+                    fluid = false,
+                    tag = true,
+                }
+            end
+        end
+    end
+    local missing = {}
+    for i = 1, #fluids do
+        missing[#missing + 1] = fluids[i]
+    end
+    for i = 1, #items do
+        missing[#missing + 1] = items[i]
+    end
+    return missing
+end
+
+--- Pull item + fluid inputs into the machine. Fails before any move if something is missing.
+local function pushInputs(stacks, machine, store, fallbackFrom)
+    -- Dry-run availability for fluids (items assumed ensured by caller).
+    for i = 1, #stacks do
+        local stack = stacks[i]
+        if stack.fluid then
+            local have, info = countFluidAvailable(store, stack.name)
+            if not info then
+                return false, {}, {
+                    name = stack.name,
+                    count = stack.count,
+                    fluid = true,
+                    error = "no_fluid_source",
+                }
+            end
+            if have < stack.count then
+                return false, {}, {
+                    name = stack.name,
+                    count = stack.count - have,
+                    fluid = true,
+                }
+            end
+        end
+    end
+
     local moved = {}
     for i = 1, #stacks do
         local stack = stacks[i]
-        if not stack.fluid then
+        if stack.fluid then
+            local _, info = countFluidAvailable(store, stack.name)
+            local n = transfer.fluid(info.peripheral, machine, info.fluid, stack.count)
+            moved[stack.name] = (moved[stack.name] or 0) + n
+            if n < stack.count then
+                return false, moved, {
+                    name = stack.name,
+                    count = stack.count - n,
+                    fluid = true,
+                }
+            end
+        else
             local from = fallbackFrom
             if store then
                 from = store.sourceOf(stack.name) or fallbackFrom
@@ -72,7 +180,11 @@ local function pushItems(stacks, machine, store, fallbackFrom)
             local n = transfer(from, machine, stack.name, stack.count)
             moved[stack.name] = (moved[stack.name] or 0) + n
             if n < stack.count then
-                return false, moved, stack
+                return false, moved, {
+                    name = stack.name,
+                    count = stack.count - n,
+                    fluid = false,
+                }
             end
         end
     end
@@ -163,7 +275,16 @@ function craft.run(recipe, opts)
         return false, "use craft.request for grow recipes"
     end
 
-    local ok, moved, missing = pushItems(recipe.inputs, opts.machine, store, from)
+    local missingList = findMissingInputs(recipe, store, opts)
+    if #missingList > 0 then
+        return false, {
+            error = "missing_input",
+            missing = missingList[1],
+            missing_all = missingList,
+        }
+    end
+
+    local ok, moved, missing = pushInputs(recipe.inputs, opts.machine, store, from)
     if not ok then
         return false, {
             error = "missing_input",
@@ -172,11 +293,44 @@ function craft.run(recipe, opts)
         }
     end
 
-    if opts.waitTicks and opts.waitTicks > 0 then
-        sleep(opts.waitTicks / 20)
+    local pullFrom = opts.pullFrom or opts.machine
+    local beforeCounts = {}
+    for i = 1, #recipe.outputs do
+        local o = recipe.outputs[i]
+        if not o.fluid then
+            beforeCounts[o.name] = countItem(pullFrom, o.name)
+        end
     end
 
-    local pullFrom = opts.pullFrom or opts.machine
+    if opts.waitTicks and opts.waitTicks > 0 then
+        sleep(opts.waitTicks / 20)
+    else
+        sleep(1)
+    end
+
+    local produced = false
+    for i = 1, #recipe.outputs do
+        local o = recipe.outputs[i]
+        if not o.fluid then
+            local have = countItem(pullFrom, o.name)
+            if have >= (beforeCounts[o.name] or 0) + o.count then
+                produced = true
+                break
+            end
+        end
+    end
+
+    if not produced then
+        return false, {
+            error = "craft_no_output",
+            missing = recipe.outputs[1] and {
+                name = recipe.outputs[1].name,
+                count = recipe.outputs[1].count,
+            } or { name = recipe.machine, count = 1 },
+            hint = "machine did not produce output (check fluids/power/circuit)",
+        }
+    end
+
     local outputs = pullOutputs(pullFrom, recipe.outputs, store, out, recipe)
 
     return true, {
@@ -230,10 +384,6 @@ function craft.catalog(list)
     end
     table.sort(catalog, function(a, b) return a.label < b.label end)
     return catalog
-end
-
-local function isCraftableName(name)
-    return name and name:sub(1, 1) ~= "#"
 end
 
 local function growPullFrom(recipe, machine, opts)
@@ -353,6 +503,7 @@ local function ensure(list, itemId, amount, opts, visiting, log)
     local runs = math.ceil(need / outStack.count)
 
     for _ = 1, runs do
+        -- 1) Recurse into craftable item inputs first.
         for i = 1, #recipe.inputs do
             local input = recipe.inputs[i]
             if not input.fluid and isCraftableName(input.name) then
@@ -362,6 +513,17 @@ local function ensure(list, itemId, amount, opts, visiting, log)
                     return false, err
                 end
             end
+        end
+
+        -- 2) Refuse to start if anything is still missing (fluids, items, tags).
+        local stillMissing = findMissingInputs(recipe, store, opts)
+        if #stillMissing > 0 then
+            visiting[itemId] = nil
+            return false, {
+                error = "missing_input",
+                missing = stillMissing[1],
+                missing_all = stillMissing,
+            }
         end
 
         local ok, detail
