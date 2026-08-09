@@ -475,6 +475,7 @@ function craft.run(recipe, opts)
         }
     end
 
+    local oneshot = recipe.oneshot == true
     local targetSets = times
     local need, anyItem = buildNeedMap(recipe.outputs, targetSets)
     local pulled = {}
@@ -505,6 +506,23 @@ function craft.run(recipe, opts)
             return setsPushed >= targetSets
         end
         for name, want in pairs(need) do
+            if (pulled[name] or 0) < want then
+                return false
+            end
+        end
+        return true
+    end
+
+    --- For oneshot recipes: only feed the next set after current outputs are pulled.
+    local function readyForNextSet()
+        if not oneshot or setsPushed == 0 then
+            return true
+        end
+        if not anyItem then
+            return true
+        end
+        local needSoFar = buildNeedMap(recipe.outputs, setsPushed)
+        for name, want in pairs(needSoFar) do
             if (pulled[name] or 0) < want then
                 return false
             end
@@ -557,7 +575,7 @@ function craft.run(recipe, opts)
             return finishOk()
         end
 
-        if pushing and setsPushed < targetSets then
+        if pushing and setsPushed < targetSets and readyForNextSet() then
             local ok, moved, missing = pushOneSet(recipe, opts.machine, store, opts)
             if ok then
                 setsPushed = setsPushed + 1

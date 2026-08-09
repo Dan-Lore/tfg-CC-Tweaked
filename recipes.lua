@@ -7,6 +7,7 @@
 --   inputs   { { name, count, fluid? }, ... }
 --   outputs  { { name, count, fluid? }, ... }
 --   flag     "grow" | "craft" | "processing"
+--   oneshot  bool   if true, feed one craft then wait for outputs before next
 
 local util = require("util")
 
@@ -67,6 +68,35 @@ local function parseMachine(machine)
     return machine, machine, nil
 end
 
+local function parseFlagField(field, lineNo)
+    field = util.trim(field or ""):lower()
+    local tokens = {}
+    for token in field:gmatch("%S+") do
+        tokens[#tokens + 1] = token
+    end
+    if #tokens == 0 then
+        error(("Recipe line %s: empty flag"):format(tostring(lineNo)))
+    end
+
+    local flag = tokens[1]
+    if flag ~= "grow" and flag ~= "craft" and flag ~= "processing" then
+        error(("Recipe line %s: unknown flag %q"):format(tostring(lineNo), flag))
+    end
+
+    local oneshot = false
+    for i = 2, #tokens do
+        local t = tokens[i]
+        if t == "oneshot" or t == "one" or t == "serial" then
+            oneshot = true
+        else
+            error(("Recipe line %s: unknown flag option %q"):format(tostring(lineNo), t))
+        end
+    end
+
+    -- Optional 5th field: oneshot / serial (also accepted in flag field as "processing oneshot")
+    return flag, oneshot
+end
+
 function recipes.parseLine(line, lineNo)
     line = util.trim(line or "")
     if line == "" or line:sub(1, 1) == "#" then
@@ -75,15 +105,20 @@ function recipes.parseLine(line, lineNo)
 
     local parts = util.split(line, "|")
     if #parts < 4 then
-        error(("Recipe line %s: expected 4 fields machine|inputs|outputs|flag"):format(tostring(lineNo)))
+        error(("Recipe line %s: expected machine|inputs|outputs|flag[|oneshot]"):format(tostring(lineNo)))
     end
 
     local machineRaw = util.trim(parts[1])
     local machine, base, circuit = parseMachine(machineRaw)
-    local flag = util.trim(parts[4]):lower()
+    local flag, oneshot = parseFlagField(parts[4], lineNo)
 
-    if flag ~= "grow" and flag ~= "craft" and flag ~= "processing" then
-        error(("Recipe line %s: unknown flag %q"):format(tostring(lineNo), flag))
+    if #parts >= 5 then
+        local extra = util.trim(parts[5]):lower()
+        if extra == "oneshot" or extra == "one" or extra == "serial" then
+            oneshot = true
+        elseif extra ~= "" then
+            error(("Recipe line %s: unknown option %q (use oneshot)"):format(tostring(lineNo), extra))
+        end
     end
 
     return {
@@ -93,6 +128,7 @@ function recipes.parseLine(line, lineNo)
         inputs = parseStackList(parts[2]),
         outputs = parseStackList(parts[3]),
         flag = flag,
+        oneshot = oneshot,
         line = lineNo,
     }
 end
