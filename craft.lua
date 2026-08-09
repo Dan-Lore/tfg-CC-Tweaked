@@ -1,6 +1,6 @@
 -- Run `processing` / `craft` / `grow` recipes from recipes.cfg.
 --
--- Sections: lock | stock | feed | wait/drain | grow | ensure | public API
+-- Sections: lock | stock | feed | wait/drain | grow | monitor stack | public API
 -- Ingredient sources and output destinations come from storage.cfg.
 
 local transfer = require("transfer")
@@ -740,15 +740,17 @@ local function runGrow(recipe, machine, opts)
 end
 
 ---------------------------------------------------------------------------
--- Ensure (pipeline: craft ready packs by min set, gather rest in parallel)
+-- Goal stack + resource monitor (replaces recursive ensure)
 ---------------------------------------------------------------------------
 
-local ensure
-
---- How many balanced recipe sets can be fed from current stock (items + fluids).
+--- How many balanced recipe sets can be fed from current stock.
+-- Grow (no inputs) is always ready.
 local function countCompleteSets(recipe, store, opts)
-    if not recipe or not recipe.inputs or #recipe.inputs == 0 then
+    if not recipe or not recipe.inputs then
         return 0
+    end
+    if #recipe.inputs == 0 then
+        return 1000000
     end
     local sets = nil
     for i = 1, #recipe.inputs do
@@ -771,414 +773,277 @@ local function countCompleteSets(recipe, store, opts)
     return sets or 0
 end
 
-local function recipeHasCraftableInputs(recipe)
-    for i = 1, #recipe.inputs do
-        local input = recipe.inputs[i]
-        if not input.fluid and isCraftableName(input.name) then
-            return true
-        end
-    end
-    return false
-end
-
---- Ensure craftable inputs toward absolute stock for `runs` parent cycles.
-local function ensureInputsParallel(list, recipe, runs, opts, visiting, log, cancelled)
-    runs = math.max(1, math.floor(tonumber(runs) or 1))
-    local jobs = {}
-    for i = 1, #recipe.inputs do
-        local input = recipe.inputs[i]
-        if not input.fluid and isCraftableName(input.name) then
-            local want = input.count * runs
-            local have = countAvailable(opts.store, input.name, opts)
-            if have < want then
-                jobs[#jobs + 1] = {
-                    name = input.name,
-                    amount = want,
-                }
-            end
-        end
-    end
-
-    if #jobs == 0 then
-        return true
-    end
-
-    if #jobs == 1 then
-        if cancelled and cancelled[1] then
-            return false, cancelled[2]
-        end
-        return ensure(list, jobs[1].name, jobs[1].amount, opts, visiting, log, cancelled)
-    end
-
-    local firstErr = nil
-    local cancelFlag = cancelled or { false, nil }
-    local funcs = {}
-    for i = 1, #jobs do
-        local job = jobs[i]
-        funcs[i] = function()
-            if cancelFlag[1] then
-                return
-            end
-            local have = countAvailable(opts.store, job.name, opts)
-            if have >= job.amount then
-                return
-            end
-            local localVisiting = {}
-            for k, v in pairs(visiting) do
-                localVisiting[k] = v
-            end
-            local ok, err = ensure(list, job.name, job.amount, opts, localVisiting, log, cancelFlag)
-            if not ok and not cancelFlag[1] then
-                cancelFlag[1] = true
-                cancelFlag[2] = err
-                firstErr = err
-            end
-        end
-    end
-
-    parallel.waitForAll(table.unpack(funcs))
-    if cancelFlag[1] then
-        return false, cancelFlag[2] or firstErr
-    end
-    return true
-end
-
-local function runCraftBatch(recipe, machine, recipeKey, store, opts, itemId, amount, outStack, log, times)
-    times = math.max(1, math.floor(tonumber(times) or 1))
-    local ok, detail = withMachineLock(machine, recipeKey, function()
-        local readyNow = countCompleteSets(recipe, store, opts)
-        local n = math.min(times, readyNow)
-        if n <= 0 then
-            return true, { skipped = true }
-        end
-        local stillMissing = findMissingInputs(recipe, store, opts, n)
-        if #stillMissing > 0 then
-            return false, {
-                error = "missing_input",
-                missing = stillMissing[1],
-                missing_all = stillMissing,
-            }
-        end
-        return craft.run(recipe, {
-            from = opts.from,
-            out = opts.out,
-            store = store,
-            machine = machine,
-            pullFrom = opts.pullFrom,
-            waitTicks = opts.waitTicks,
-            craftWaitTimeout = opts.craftWaitTimeout,
-            times = n,
-        })
-    end)
-    if ok and detail and not detail.skipped then
-        log[#log + 1] = {
-            item = itemId,
-            machine = machine,
-            flag = recipe.flag,
-            detail = detail,
-            times = detail.times,
-        }
-    end
-    return ok, detail
-end
-
-ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
-    amount = math.max(0, math.floor(tonumber(amount) or 0))
-    if amount <= 0 then
-        return true
-    end
-    if cancelled and cancelled[1] then
-        return false, cancelled[2]
-    end
-
-    local store = opts.store
-    local before = countAvailable(store, itemId, opts)
-    local need = amount - before
-    if need <= 0 then
-        return true
-    end
-
-    if visiting[itemId] then
-        return false, {
-            error = "cycle",
-            missing = { name = itemId, count = need },
-        }
-    end
-
-    local recipe, outStack = craft.findByOutput(list, itemId)
-    if not recipe then
-        return false, {
-            error = "missing_input",
-            missing = { name = itemId, count = need },
-        }
-    end
-    if not outStack or not outStack.count or outStack.count <= 0 then
-        return false, {
-            error = "missing_input",
-            missing = { name = itemId, count = need },
-            hint = "recipe has no item output count",
-        }
-    end
-
-    local machine = opts.machine or craft.resolveMachine(recipe)
+local function tryWithMachineLock(machine, recipeKey, fn)
     if not machine then
+        return false, { error = "no_machine" }
+    end
+    if machineLocks[machine] then
+        return false, { error = "busy" }
+    end
+    machineLocks[machine] = { key = recipeKey or "unknown" }
+    local ok, a, b = pcall(fn)
+    machineLocks[machine] = nil
+    if not ok then
         return false, {
-            error = "no_machine",
-            missing = { name = recipe.base, count = 1 },
-            item = itemId,
+            error = "exception",
+            missing = { name = tostring(a), count = 1 },
         }
     end
+    return a, b
+end
 
-    visiting[itemId] = true
-    local recipeKey = recipes.recipeKey(recipe)
-    local produced = 0
+local function emitActivity(opts, text)
+    if opts and type(opts.onActivity) == "function" then
+        pcall(opts.onActivity, text)
+    end
+end
 
-    local function fail(err)
-        visiting[itemId] = nil
-        return false, err
+local function emitProgress(opts, done, total)
+    if opts and type(opts.onProgress) == "function" then
+        pcall(opts.onProgress, done, total)
+    end
+end
+
+local function activityText(recipe, itemId)
+    local out = recipes.primaryOutput(recipe)
+    local n = out and out.count or 1
+    local name = itemId:match("([^/]+)$") or itemId
+    if recipe.flag == "grow" then
+        return "grow " .. name .. " x" .. tostring(n)
+    end
+    return name .. " x" .. tostring(n)
+end
+
+--- Monitor: maintain ingredient stock; root progress only via crafted counter.
+local function monitorRequest(list, rootItemId, amount, opts, log)
+    local store = opts.store
+    local rootWant = amount
+    local rootCrafted = 0
+    local hardSticky = nil
+
+    local function rootDone()
+        return rootCrafted >= rootWant
     end
 
-    local function noteProduced(detail, fallbackSets)
-        local sets = fallbackSets or 0
-        if detail and not detail.skipped then
-            sets = tonumber(detail.sets_pushed) or tonumber(detail.times) or sets
+    local function gather()
+        local candidates = {}
+        local seenMachine = {}
+        local visiting = {}
+        local hard = nil
+
+        local function consider(itemId, wantUnits)
+            if wantUnits <= 0 or visiting[itemId] then
+                return
+            end
+            visiting[itemId] = true
+
+            local recipe, outStack = craft.findByOutput(list, itemId)
+            if not recipe or not outStack then
+                visiting[itemId] = nil
+                return
+            end
+
+            local per = outStack.count
+            local isRoot = itemId == rootItemId
+            local have = countAvailable(store, itemId, opts)
+            local stillProduce
+            if isRoot then
+                stillProduce = rootWant - rootCrafted
+            else
+                stillProduce = wantUnits - have
+            end
+            if stillProduce <= 0 then
+                visiting[itemId] = nil
+                return
+            end
+
+            local runsWanted = math.ceil(stillProduce / per)
+
+            for i = 1, #recipe.inputs do
+                local input = recipe.inputs[i]
+                if input.fluid then
+                    local haveF, info = countFluidAvailable(store, input.name)
+                    if (not info or haveF < input.count) and countCompleteSets(recipe, store, opts) < 1 then
+                        hard = {
+                            error = "missing_input",
+                            missing = {
+                                name = input.name,
+                                count = input.count - (haveF or 0),
+                                fluid = true,
+                                error = (not info) and "no_fluid_source" or nil,
+                            },
+                        }
+                    end
+                elseif isCraftableName(input.name) then
+                    local childRecipe = craft.findByOutput(list, input.name)
+                    if childRecipe then
+                        consider(input.name, input.count * runsWanted)
+                    else
+                        local haveI = countAvailable(store, input.name, opts)
+                        if haveI < input.count * runsWanted then
+                            hard = {
+                                error = "missing_input",
+                                missing = {
+                                    name = input.name,
+                                    count = input.count * runsWanted - haveI,
+                                    fluid = false,
+                                },
+                            }
+                        end
+                    end
+                else
+                    local sources = pullSourcesFor(store, input.name, opts)
+                    local haveI = transfer.countFromMany(sources, input.name)
+                    if haveI < input.count * runsWanted then
+                        hard = {
+                            error = "missing_input",
+                            missing = {
+                                name = input.name,
+                                count = input.count * runsWanted - haveI,
+                                fluid = false,
+                                tag = true,
+                            },
+                        }
+                    end
+                end
+            end
+
+            local ready = countCompleteSets(recipe, store, opts)
+            if ready >= 1 then
+                local machine = craft.resolveMachine(recipe)
+                if machine and not machineLocks[machine] and not seenMachine[machine] then
+                    local should = isRoot or (have < wantUnits)
+                    if should then
+                        seenMachine[machine] = true
+                        candidates[#candidates + 1] = {
+                            itemId = itemId,
+                            recipe = recipe,
+                            outStack = outStack,
+                            machine = machine,
+                            recipeKey = recipes.recipeKey(recipe),
+                            isRoot = isRoot,
+                        }
+                    end
+                end
+            end
+
+            visiting[itemId] = nil
         end
-        if sets > 0 then
-            produced = produced + sets * outStack.count
-        end
+
+        consider(rootItemId, rootWant - rootCrafted)
+        return candidates, hard
     end
 
-    -- Production-based success: a parallel parent (oven) may consume intermediates.
-    local function fulfilled()
-        if produced >= need then
+    local function runOne(job)
+        emitActivity(opts, activityText(job.recipe, job.itemId))
+        local ok, detail = tryWithMachineLock(job.machine, job.recipeKey, function()
+            if job.recipe.flag == "grow" then
+                return runGrow(job.recipe, job.machine, opts)
+            end
+            return craft.run(job.recipe, {
+                from = opts.from,
+                out = opts.out,
+                store = store,
+                machine = job.machine,
+                pullFrom = opts.pullFrom,
+                waitTicks = opts.waitTicks,
+                craftWaitTimeout = opts.craftWaitTimeout,
+                times = 1,
+            })
+        end)
+
+        if detail and detail.error == "busy" then
             return true
         end
-        return countAvailable(store, itemId, opts) >= amount
+        if not ok then
+            return false, detail
+        end
+        if detail and detail.skipped then
+            return true
+        end
+
+        local gained = job.outStack.count
+        if detail and detail.sets_pushed and detail.sets_pushed > 0 then
+            gained = job.outStack.count * detail.sets_pushed
+        elseif detail and detail.times then
+            gained = job.outStack.count * detail.times
+        end
+
+        if job.isRoot then
+            rootCrafted = rootCrafted + gained
+            emitProgress(opts, rootCrafted, rootWant)
+        end
+
+        log[#log + 1] = {
+            item = job.itemId,
+            machine = job.machine,
+            flag = job.recipe.flag,
+            detail = detail,
+            times = 1,
+        }
+        return true
     end
 
-    if recipe.flag == "grow" then
-        local runs = math.ceil(need / outStack.count)
-        for _ = 1, runs do
-            if cancelled and cancelled[1] then
-                return fail(cancelled[2])
-            end
-            if fulfilled() then
+    emitProgress(opts, 0, rootWant)
+    emitActivity(opts, "planning...")
+
+    while not rootDone() do
+        local candidates, hard = gather()
+        if hard then
+            hardSticky = hard
+        end
+
+        if #candidates == 0 then
+            -- Don't abort on leaf shortage while another craft still holds a machine.
+            local busy = false
+            for _ in pairs(machineLocks) do
+                busy = true
                 break
             end
-
-            local okIn, errIn = ensureInputsParallel(list, recipe, 1, opts, visiting, log, cancelled)
-            if not okIn then
-                return fail(errIn)
+            if hardSticky and not busy then
+                return false, hardSticky
             end
-
-            local stillMissing = findMissingInputs(recipe, store, opts, 1)
-            if #stillMissing > 0 then
-                return fail({
-                    error = "missing_input",
-                    missing = stillMissing[1],
-                    missing_all = stillMissing,
-                })
-            end
-
-            local ok, detail = withMachineLock(machine, recipeKey, function()
-                if fulfilled() then
-                    return true, { skipped = true }
-                end
-                return runGrow(recipe, machine, opts)
-            end)
-            if not ok then
-                return fail(detail)
-            end
-            if detail and not detail.skipped then
-                noteProduced(detail, 1)
-                log[#log + 1] = {
-                    item = itemId,
-                    machine = machine,
-                    flag = recipe.flag,
-                    detail = detail,
-                }
-            end
-        end
-    else
-        local stop = { false, nil }
-        local function shouldStop()
-            if stop[1] then
-                return true
-            end
-            if cancelled and cancelled[1] then
-                stop[1] = true
-                stop[2] = cancelled[2]
-                return true
-            end
-            return fulfilled()
-        end
-
-        local function remainingRuns()
-            if fulfilled() then
-                return 0
-            end
-            local byProd = math.ceil((need - produced) / outStack.count)
-            local haveOut = countAvailable(store, itemId, opts)
-            local byStock = math.max(0, math.ceil((amount - haveOut) / outStack.count))
-            return math.max(byProd, byStock)
-        end
-
-        local function handleBatchResult(ok, detail)
-            if detail then
-                noteProduced(detail, 0)
-            end
-            if ok then
-                return true
-            end
-            -- Partial oneshot progress: keep going for the rest.
-            if detail and detail.error == "craft_short" and not fulfilled() then
-                return true
-            end
-            stop[1] = true
-            stop[2] = detail
-            return false
-        end
-
-        local function consumerCraft()
-            while not shouldStop() do
-                local rem = remainingRuns()
-                if rem <= 0 then
-                    return
-                end
-                local ready = countCompleteSets(recipe, store, opts)
-                local n = math.min(ready, rem)
-                if n > 0 then
-                    local ok, detail = runCraftBatch(
-                        recipe, machine, recipeKey, store, opts, itemId, amount, outStack, log, n
-                    )
-                    if not handleBatchResult(ok, detail) then
-                        return
-                    end
-                else
-                    sleep(0.25)
-                end
-            end
-        end
-
-        local function isSoftEnsureErr(err)
-            if type(err) ~= "table" then
-                return false
-            end
-            local e = err
-            -- craft.request wraps as { error = inner }; ensure may return inner directly
-            for _ = 1, 3 do
-                if type(e) ~= "table" then
-                    break
-                end
-                if e.error == "craft_short" then
-                    return true
-                end
-                if e.error == "missing_input" and e.missing then
-                    return #hardMissingInputs(list, { e.missing }) == 0
-                end
-                if type(e.error) == "table" then
-                    e = e.error
-                else
-                    break
-                end
-            end
-            return false
-        end
-
-        local function producerGather()
-            while not shouldStop() do
-                local rem = remainingRuns()
-                if rem <= 0 then
-                    return
-                end
-                local ready = countCompleteSets(recipe, store, opts)
-                if ready >= rem then
-                    sleep(0.25)
-                else
-                    local wantSets = math.min(rem, ready + 1)
-                    local okIn, errIn = ensureInputsParallel(
-                        list, recipe, wantSets, opts, visiting, log, cancelled
-                    )
-                    if not okIn then
-                        if isSoftEnsureErr(errIn) then
-                            sleep(0.25)
-                        else
-                            stop[1] = true
-                            stop[2] = errIn
-                            return
-                        end
-                    elseif countCompleteSets(recipe, store, opts) < 1 and not shouldStop() then
-                        -- Empty after ensure: often consumed by oven. Abort only on leaf shortages.
-                        local stillMissing = findMissingInputs(recipe, store, opts, 1)
-                        local hard = hardMissingInputs(list, stillMissing)
-                        if #hard > 0 then
-                            stop[1] = true
-                            stop[2] = {
-                                error = "missing_input",
-                                missing = hard[1],
-                                missing_all = hard,
-                            }
-                            return
-                        end
-                    end
-                    sleep(0.05)
-                end
-            end
-        end
-
-        if recipeHasCraftableInputs(recipe) then
-            parallel.waitForAll(producerGather, consumerCraft)
+            emitActivity(opts, "waiting...")
+            sleep(0.35)
         else
-            while not shouldStop() do
-                local rem = remainingRuns()
-                if rem <= 0 then
-                    break
+            hardSticky = nil
+            if #candidates == 1 then
+                local ok, err = runOne(candidates[1])
+                if not ok then
+                    return false, err
                 end
-                local ready = countCompleteSets(recipe, store, opts)
-                local n = math.min(ready, rem)
-                if n > 0 then
-                    local ok, detail = runCraftBatch(
-                        recipe, machine, recipeKey, store, opts, itemId, amount, outStack, log, n
-                    )
-                    if not handleBatchResult(ok, detail) then
-                        return fail(detail)
+            else
+                local firstErr = nil
+                local funcs = {}
+                for i = 1, #candidates do
+                    local job = candidates[i]
+                    funcs[i] = function()
+                        if firstErr then
+                            return
+                        end
+                        local ok, err = runOne(job)
+                        if not ok and not firstErr then
+                            firstErr = err
+                        end
                     end
-                else
-                    local stillMissing = findMissingInputs(recipe, store, opts, 1)
-                    if #stillMissing > 0 then
-                        return fail({
-                            error = "missing_input",
-                            missing = stillMissing[1],
-                            missing_all = stillMissing,
-                        })
-                    end
-                    sleep(0.5)
+                end
+                parallel.waitForAll(table.unpack(funcs))
+                if firstErr then
+                    return false, firstErr
                 end
             end
         end
-
-        if stop[1] then
-            return fail(stop[2])
-        end
     end
 
-    visiting[itemId] = nil
-
-    if not fulfilled() then
-        return false, {
-            error = "craft_short",
-            missing = { name = itemId, count = math.max(1, need - produced) },
-        }
-    end
-
-    return true
+    return true, rootCrafted
 end
 
 ---------------------------------------------------------------------------
 -- Public request API
 ---------------------------------------------------------------------------
 
---- Craft/grow until at least `amount` of the output item is available.
+--- Craft/grow until `amount` of the target has been produced (craft counter).
+-- opts.onActivity(text), opts.onProgress(done, total) for UI.
 function craft.request(itemId, amount, opts)
     opts = opts or {}
     amount = math.max(1, math.floor(tonumber(amount) or 1))
@@ -1204,34 +1069,43 @@ function craft.request(itemId, amount, opts)
     assert(opts.from and opts.out, "opts.from and opts.out (or opts.store) required")
 
     local list = craft.loadRequest(opts.cfg)
-    local before = countAvailable(store, itemId, opts)
-    local log = {}
-
-    local ensureOpts = {
-        from = opts.from,
-        out = opts.out,
-        store = store,
-        pullFrom = opts.pullFrom,
-        waitTicks = opts.waitTicks,
-        craftWaitTimeout = opts.craftWaitTimeout or DEFAULT_CRAFT_WAIT,
-        growPulse = opts.growPulse,
-        growWaitTimeout = opts.growWaitTimeout,
-        cfg = opts.cfg,
-    }
-
-    local ok, err = ensure(list, itemId, before + amount, ensureOpts, {}, log, { false, nil })
-    if not ok then
+    local foundRecipe, foundOut = craft.findByOutput(list, itemId)
+    if not foundRecipe then
         return false, {
-            error = err,
-            produced = math.max(0, countAvailable(store, itemId, opts) - before),
+            error = {
+                error = "missing_input",
+                missing = { name = itemId, count = amount },
+            },
+            produced = 0,
+            steps = {},
+        }
+    end
+
+    local log = {}
+    local ok, result = monitorRequest(list, itemId, amount, opts, log)
+    if not ok then
+        local produced = 0
+        local per = foundOut and foundOut.count or 1
+        for i = 1, #log do
+            if log[i].item == itemId then
+                local d = log[i].detail
+                if d and d.sets_pushed then
+                    produced = produced + d.sets_pushed * per
+                else
+                    produced = produced + per
+                end
+            end
+        end
+        return false, {
+            error = result,
+            produced = produced,
             steps = log,
         }
     end
 
-    local after = countAvailable(store, itemId, opts)
     return true, {
         item = itemId,
-        produced = after - before,
+        produced = result,
         steps = log,
     }
 end

@@ -29,6 +29,9 @@ local state = {
     storageLabel = "",
     status = "Ready",
     statusKind = "info", -- info | ok | error | busy
+    activity = "",
+    progressDone = 0,
+    progressTotal = 0,
     busy = false,
 }
 
@@ -76,6 +79,9 @@ local function statusLines()
     if state.statusKind == "error" then
         return 2
     end
+    if state.statusKind == "busy" then
+        return 2
+    end
     return 1
 end
 
@@ -89,6 +95,11 @@ end
 local function setStatus(text, kind)
     state.status = tostring(text or "")
     state.statusKind = kind or "info"
+    if kind ~= "busy" then
+        state.activity = ""
+        state.progressDone = 0
+        state.progressTotal = 0
+    end
 end
 
 local function formatError(detail)
@@ -198,6 +209,36 @@ local function ensureVisible()
     state.scroll = util.clamp(state.scroll, 0, math.max(0, #state.catalog - listH))
 end
 
+local function drawBusyStatus(statusY, fg, bg)
+    -- Line 1: left label + right-aligned progress N/M
+    local left = state.status or ""
+    local prog = ""
+    if state.progressTotal and state.progressTotal > 0 then
+        prog = tostring(state.progressDone or 0) .. "/" .. tostring(state.progressTotal)
+    end
+    fill(1, statusY, W, 1, bg)
+    local leftMax = W - #prog
+    if leftMax < 1 then
+        leftMax = W
+        prog = ""
+    end
+    if #left > leftMax then
+        left = left:sub(1, leftMax)
+    end
+    writeAt(1, statusY, left, fg, bg)
+    if #prog > 0 then
+        writeAt(W - #prog + 1, statusY, prog, fg, bg)
+    end
+
+    -- Line 2: live activity
+    local act = state.activity or ""
+    fill(1, statusY + 1, W, 1, bg)
+    if #act > W then
+        act = act:sub(1, W)
+    end
+    writeAt(1, statusY + 1, act, fg, bg)
+end
+
 local function draw()
     buttons = {}
     mon.setBackgroundColor(colors.black)
@@ -226,23 +267,27 @@ local function draw()
     end
 
     local statusY = 3
-    fill(1, statusY, W, lines, bg)
-    if lines == 1 then
-        if #status > W then
-            status = status:sub(1, W)
-        end
-        writeAt(1, statusY, status, fg, bg)
+    if state.statusKind == "busy" then
+        drawBusyStatus(statusY, fg, bg)
     else
-        local line1, line2 = status, ""
-        if #status > W then
-            line1 = status:sub(1, W)
-            line2 = status:sub(W + 1)
-            if #line2 > W then
-                line2 = line2:sub(1, W)
+        fill(1, statusY, W, lines, bg)
+        if lines == 1 then
+            if #status > W then
+                status = status:sub(1, W)
             end
+            writeAt(1, statusY, status, fg, bg)
+        else
+            local line1, line2 = status, ""
+            if #status > W then
+                line1 = status:sub(1, W)
+                line2 = status:sub(W + 1)
+                if #line2 > W then
+                    line2 = line2:sub(1, W)
+                end
+            end
+            writeAt(1, statusY, line1, fg, bg)
+            writeAt(1, statusY + 1, line2, fg, bg)
         end
-        writeAt(1, statusY, line1, fg, bg)
-        writeAt(1, statusY + 1, line2, fg, bg)
     end
 
     local listTop, listH = listWindow()
@@ -312,7 +357,10 @@ local function doCraft()
     end
 
     state.busy = true
-    setStatus("Crafting " .. util.short(entry.id) .. "...", "busy")
+    state.progressDone = 0
+    state.progressTotal = state.amount
+    state.activity = "planning..."
+    setStatus("Crafting " .. util.short(entry.id), "busy")
     draw()
 
     local ok, detail = craft.request(entry.id, state.amount, {
@@ -320,9 +368,19 @@ local function doCraft()
         craftWaitTimeout = CONFIG.craftWaitTimeout,
         growPulse = CONFIG.growPulse,
         growWaitTimeout = CONFIG.growWaitTimeout,
+        onActivity = function(text)
+            state.activity = tostring(text or "")
+            draw()
+        end,
+        onProgress = function(done, total)
+            state.progressDone = tonumber(done) or 0
+            state.progressTotal = tonumber(total) or state.amount
+            draw()
+        end,
     })
 
     state.busy = false
+    state.activity = ""
     if ok then
         setStatus("OK +" .. tostring(detail.produced), "ok")
     else
