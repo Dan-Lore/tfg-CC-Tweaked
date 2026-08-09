@@ -132,13 +132,18 @@ local function drainOverflow(store, growRecipes)
 end
 
 local function cleanGreenhouse(store, growRecipes, recipe)
-    local machine = peripherals.resolveMachine(recipe)
-    if not machine then
-        print(("no greenhouse for %s"):format(recipe.machine))
+    -- Products leave via GT output bus, not the greenhouse controller inventory.
+    local source = store.outputBus(recipe.circuit or 0)
+    if not peripheral.isPresent(source) then
+        -- Fallback: greenhouse peripheral itself (older setups)
+        source = peripherals.resolveMachine(recipe)
+    end
+    if not source then
+        print(("no output bus/greenhouse for %s"):format(recipe.machine))
         return
     end
 
-    local inv = peripheral.wrap(machine)
+    local inv = peripheral.wrap(source)
     if not inv or not inv.list then
         return
     end
@@ -150,7 +155,7 @@ local function cleanGreenhouse(store, growRecipes, recipe)
             seen[name] = true
             local dest = destForItem(store, growRecipes, recipe, name)
             if dest and peripheral.isPresent(dest) then
-                moveWithOverflow(store, machine, dest, name)
+                moveWithOverflow(store, source, dest, name)
             elseif dest then
                 print(("missing dest %s for %s"):format(tostring(dest), short(name)))
             end

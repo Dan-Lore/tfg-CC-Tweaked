@@ -245,8 +245,16 @@ local function runGrow(recipe, machine, opts)
         }
     end
 
-    local pullFrom = opts.pullFrom or machine
     local store = opts.store
+    -- Prefer configured output bus (gtceu:mv_output_bus_N), then machine inventory.
+    local pullFrom = opts.pullFrom
+    if not pullFrom and store then
+        local bus = store.outputBus(recipe.circuit or 0)
+        if bus and peripheral.isPresent(bus) then
+            pullFrom = bus
+        end
+    end
+    pullFrom = pullFrom or machine
     local out = opts.out or (store and store.main())
     local outputs = pullOutputs(pullFrom, recipe.outputs, store, out, recipe)
     return true, {

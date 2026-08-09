@@ -44,6 +44,7 @@ local NAMED_KEYS = {
     flora = true,
     overflow = true,
     seed_chest_prefix = true,
+    output_bus_prefix = true,
 }
 
 local function parseLine(cfg, line, lineNo)
@@ -149,6 +150,10 @@ function storage.load(path)
         return cfg.named.seed_chest_prefix or "gtceu:lv_super_chest_"
     end
 
+    function cfg.outputBusPrefix()
+        return cfg.named.output_bus_prefix or "gtceu:mv_output_bus_"
+    end
+
     function cfg.sourceOf(itemId)
         return cfg.sources[itemId] or cfg.named.main
     end
@@ -164,6 +169,12 @@ function storage.load(path)
     function cfg.seedDest(index)
         index = tonumber(index) or 0
         return cfg.seedChestPrefix() .. tostring(index)
+    end
+
+    --- Output bus for greenhouse index / circuit (e.g. gtceu:mv_output_bus_0).
+    function cfg.outputBus(index)
+        index = tonumber(index) or 0
+        return cfg.outputBusPrefix() .. tostring(index)
     end
 
     function cfg.seedForCrop(cropId)
