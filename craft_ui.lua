@@ -1,18 +1,17 @@
--- Craft UI: pick output item + amount on a right-side 3x2 monitor.
---
--- Setup (edit CONFIG for your world):
---   Monitor attached on the right (3 wide, 2 tall).
---   Storage / machine peripherals must be networked to this computer.
+-- Craft UI: pick output item + amount on a monitor.
+-- Inventory / monitor settings come from storage.cfg (no hard-coded fridge).
 
 local craft = require("craft")
+local storage = require("storage")
+
+local store = storage.load()
 
 local CONFIG = {
-    monitor = "right",
-    storage = "tfg:ev_food_refrigerator_0",
-    textScale = 0.5,
-    waitTicks = 100,
-    growDuration = 10, -- seconds for electric greenhouse grow steps
-    maxAmount = 64,
+    monitor = store.get("monitor", "right"),
+    textScale = store.getNumber("text_scale", 0.5),
+    waitTicks = store.getNumber("wait_ticks", 100),
+    growDuration = store.getNumber("grow_duration", 10),
+    maxAmount = store.getNumber("max_amount", 64),
 }
 
 local mon = assert(peripheral.wrap(CONFIG.monitor), "No monitor on " .. CONFIG.monitor)
@@ -87,7 +86,6 @@ local function statusLines()
 end
 
 local function listWindow()
-    -- Row 1 title, row 2 storage (always), then status, list, bottom controls
     local listTop = 3 + statusLines()
     local listBottom = H - 2
     local listH = math.max(1, listBottom - listTop + 1)
@@ -99,7 +97,6 @@ local function setStatus(text, kind)
     state.statusKind = kind or "info"
 end
 
---- Unwrap craft.request / craft.run error tables into a short monitor message.
 local function formatError(detail)
     local function fromMissing(missing)
         if not missing or not missing.name then
@@ -122,7 +119,6 @@ local function formatError(detail)
         if type(err) ~= "table" then
             break
         end
-        -- Machine errors first (missing.name here is the machine id, not an item).
         if err.error == "no_machine" then
             return "NO MACHINE " .. short(err.missing and err.missing.name or err.item or "?")
         end
@@ -164,13 +160,12 @@ local function draw()
     local amtText = "x" .. tostring(state.amount)
     writeAt(W - #amtText + 1, 1, amtText, colors.white, colors.black)
 
-    -- Persistent storage line
-    local store = state.storageLabel
-    if #store > W then
-        store = store:sub(1, W)
+    local storeLine = state.storageLabel
+    if #storeLine > W then
+        storeLine = storeLine:sub(1, W)
     end
     fill(1, 2, W, 1, colors.gray)
-    writeAt(1, 2, store, colors.white, colors.gray)
+    writeAt(1, 2, storeLine, colors.white, colors.gray)
 
     local lines = statusLines()
     local status = state.status or ""
@@ -212,22 +207,21 @@ local function draw()
         local entry = state.catalog[idx]
         if entry then
             local selected = idx == state.selected
-            local bg = selected and colors.blue or colors.black
-            local fg = selected and colors.white or colors.lightGray
-            fill(1, y, W, 1, bg)
+            local rowBg = selected and colors.blue or colors.black
+            local rowFg = selected and colors.white or colors.lightGray
+            fill(1, y, W, 1, rowBg)
             local mark = selected and ">" or " "
             local label = mark .. short(entry.id)
             if #label > W then
                 label = label:sub(1, W)
             end
-            writeAt(1, y, label, fg, bg)
-            addButton("pick:" .. idx, 1, y, W, 1, label, fg, bg)
+            writeAt(1, y, label, rowFg, rowBg)
+            addButton("pick:" .. idx, 1, y, W, 1, label, rowFg, rowBg)
         else
             fill(1, y, W, 1, colors.black)
         end
     end
 
-    -- Bottom controls: [-] [+] [GO]
     local y = H - 1
     local btnW = math.max(3, math.floor(W / 3))
     local gap = W - btnW * 3
@@ -249,18 +243,6 @@ local function draw()
     addButton("craft", xGo, y, btnW, 2, goLabel, colors.black, colors.orange)
 end
 
-local function resolveStorage()
-    if CONFIG.storage and peripheral.isPresent(CONFIG.storage) then
-        return CONFIG.storage
-    end
-    for _, name in ipairs(peripheral.getNames()) do
-        if name:find("refrigerator", 1, true) or name:find("chest", 1, true) then
-            return name
-        end
-    end
-    return nil
-end
-
 local function doCraft()
     if state.busy then
         return
@@ -272,9 +254,9 @@ local function doCraft()
         return
     end
 
-    local storage = resolveStorage()
-    if not storage then
-        setStatus("Set CONFIG.storage", "error")
+    local mainInv = store.main()
+    if not mainInv or not peripheral.isPresent(mainInv) then
+        setStatus("main missing in storage.cfg", "error")
         draw()
         return
     end
@@ -284,8 +266,7 @@ local function doCraft()
     draw()
 
     local ok, detail = craft.request(entry.id, state.amount, {
-        from = storage,
-        out = storage,
+        store = store,
         waitTicks = CONFIG.waitTicks,
         growDuration = CONFIG.growDuration,
     })
@@ -341,13 +322,13 @@ local function main()
         return
     end
 
-    local storage = resolveStorage()
-    if storage then
-        state.storageLabel = "Store: " .. short(storage)
+    local mainInv = store.main()
+    if mainInv and peripheral.isPresent(mainInv) then
+        state.storageLabel = "Store: " .. short(mainInv)
         setStatus("Ready", "info")
     else
         state.storageLabel = "Store: NONE"
-        setStatus("Set CONFIG.storage", "error")
+        setStatus("main missing in storage.cfg", "error")
     end
 
     draw()

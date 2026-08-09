@@ -1,23 +1,74 @@
 -- Run `processing` / `craft` / `grow` recipes from recipes.cfg.
--- Storage peripherals are always passed by the caller — no hard-coded inventories.
+-- Ingredient sources and output destinations come from storage.cfg when provided.
 
 local transfer = require("transfer")
 local recipes = require("recipes")
 local greenhouse = require("greenhouse")
+local peripherals = require("peripherals")
 
 local craft = {}
 
 local DEFAULT_CFG = "recipes.cfg"
 local DEFAULT_GROW_DURATION = 10 -- seconds
 
---- Move all non-fluid inputs from inventory into the machine.
--- Fluids must be handled by the caller (tanks / GT fluid hatches).
-local function pushItems(from, to, stacks)
+craft.resolveMachine = peripherals.resolveMachine
+
+local function countItem(invName, itemName)
+    local inv = peripheral.wrap(invName)
+    if not inv or not inv.list then
+        return 0
+    end
+    local total = 0
+    for _, item in pairs(inv.list()) do
+        if item.name == itemName then
+            total = total + item.count
+        end
+    end
+    return total
+end
+
+local function countAvailable(store, itemName, opts)
+    if not store then
+        local total = countItem(opts.from, itemName)
+        if opts.out and opts.out ~= opts.from then
+            total = total + countItem(opts.out, itemName)
+        end
+        return total
+    end
+
+    local seen = {}
+    local total = 0
+    local function add(inv)
+        if inv and not seen[inv] and peripheral.isPresent(inv) then
+            seen[inv] = true
+            total = total + countItem(inv, itemName)
+        end
+    end
+
+    add(store.sourceOf(itemName))
+    add(store.destFor(itemName))
+    add(store.main())
+    add(store.overflow())
+    if opts and opts.from then
+        add(opts.from)
+    end
+    if opts and opts.out then
+        add(opts.out)
+    end
+    return total
+end
+
+--- Pull inputs from per-item sources into the machine.
+local function pushItems(stacks, machine, store, fallbackFrom)
     local moved = {}
     for i = 1, #stacks do
         local stack = stacks[i]
         if not stack.fluid then
-            local n = transfer(from, to, stack.name, stack.count)
+            local from = fallbackFrom
+            if store then
+                from = store.sourceOf(stack.name) or fallbackFrom
+            end
+            local n = transfer(from, machine, stack.name, stack.count)
             moved[stack.name] = (moved[stack.name] or 0) + n
             if n < stack.count then
                 return false, moved, stack
@@ -27,20 +78,41 @@ local function pushItems(from, to, stacks)
     return true, moved, nil
 end
 
---- Pull recipe outputs from the machine into an inventory.
-local function pullItems(from, to, stacks)
+--- Destination for a recipe output (routes, seed-chest for plant-as-seed crops).
+local function outputDest(store, recipe, itemName, fallbackOut)
+    if not store then
+        return fallbackOut
+    end
+    if recipe and recipe.flag == "grow" then
+        local seedItem = store.seedForCrop(itemName)
+        -- Basil-like: crop id is also the "seed" → seed chest, not fridge.
+        if seedItem and seedItem == itemName and recipe.circuit ~= nil then
+            return store.seedDest(recipe.circuit)
+        end
+    end
+    return store.destFor(itemName) or fallbackOut
+end
+
+--- Pull recipe outputs into per-item destinations (route-aware).
+local function pullOutputs(from, stacks, store, fallbackOut, recipe)
     local moved = {}
     for i = 1, #stacks do
         local stack = stacks[i]
         if not stack.fluid then
-            local n = transfer(from, to, stack.name, stack.count)
+            local dest = outputDest(store, recipe, stack.name, fallbackOut)
+            local n = transfer(from, dest, stack.name, stack.count)
+            if store and n < stack.count then
+                local overflow = store.overflow()
+                if overflow and overflow ~= dest and peripheral.isPresent(overflow) then
+                    n = n + transfer(from, overflow, stack.name, stack.count - n)
+                end
+            end
             moved[stack.name] = (moved[stack.name] or 0) + n
         end
     end
     return moved
 end
 
---- Load recipes for the craft UI catalog (processing / craft only).
 function craft.load(path)
     local all = recipes.load(path or DEFAULT_CFG)
     return recipes.filter(all, function(r)
@@ -48,7 +120,6 @@ function craft.load(path)
     end)
 end
 
---- Load recipes used by recursive request (includes grow).
 function craft.loadRequest(path)
     local all = recipes.load(path or DEFAULT_CFG)
     return recipes.filter(all, function(r)
@@ -56,13 +127,10 @@ function craft.loadRequest(path)
     end)
 end
 
---- All recipes for a machine id (with circuit suffix).
 function craft.findAll(list, machine)
     return recipes.byMachine(list, machine)
 end
 
---- Find recipe by machine. If several share the same circuit, pass `wantOutput`
---- item id to disambiguate (e.g. "firmalife:food/pizza_dough").
 function craft.find(list, machine, wantOutput)
     local matches = recipes.byMachine(list, machine)
     if #matches == 0 then
@@ -82,22 +150,19 @@ function craft.find(list, machine, wantOutput)
     return nil
 end
 
---- Execute one processing recipe once.
--- @param recipe table from recipes.lua
--- @param opts.from     peripheral name of input inventory (required)
--- @param opts.machine  peripheral name of the machine (required)
--- @param opts.out      peripheral name of output inventory (required)
--- @param opts.pullFrom optional; where to pull outputs from (defaults to opts.machine)
--- @return ok, detail
 function craft.run(recipe, opts)
     assert(recipe, "recipe required")
-    assert(opts and opts.from and opts.machine and opts.out, "opts.from, opts.machine, opts.out required")
+    assert(opts and opts.machine, "opts.machine required")
+    local store = opts.store
+    local from = opts.from or (store and store.main())
+    local out = opts.out or (store and store.main())
+    assert(from and out, "opts.from/opts.out or opts.store required")
 
     if recipe.flag == "grow" then
         return false, "use craft.request for grow recipes"
     end
 
-    local ok, moved, missing = pushItems(opts.from, opts.machine, recipe.inputs)
+    local ok, moved, missing = pushItems(recipe.inputs, opts.machine, store, from)
     if not ok then
         return false, {
             error = "missing_input",
@@ -106,13 +171,12 @@ function craft.run(recipe, opts)
         }
     end
 
-    -- Machines craft on their own once items/fluids/EU are present.
     if opts.waitTicks and opts.waitTicks > 0 then
         sleep(opts.waitTicks / 20)
     end
 
     local pullFrom = opts.pullFrom or opts.machine
-    local outputs = pullItems(pullFrom, opts.out, recipe.outputs)
+    local outputs = pullOutputs(pullFrom, recipe.outputs, store, out, recipe)
 
     return true, {
         inputs = moved,
@@ -123,8 +187,6 @@ function craft.run(recipe, opts)
     }
 end
 
---- Convenience: load cfg, pick machine recipe, run once.
--- opts.wantOutput disambiguates when several recipes share one circuit.
 function craft.once(machine, opts)
     local list = craft.load(opts and opts.cfg)
     local recipe = craft.find(list, machine, opts and opts.wantOutput)
@@ -134,7 +196,6 @@ function craft.once(machine, opts)
     return craft.run(recipe, opts)
 end
 
---- First recipe that produces itemId (non-fluid output).
 function craft.findByOutput(list, itemId)
     for i = 1, #list do
         local outs = list[i].outputs
@@ -147,7 +208,6 @@ function craft.findByOutput(list, itemId)
     return nil, nil
 end
 
---- Unique craftable output items: { { id, label, recipe, perCraft }, ... }
 function craft.catalog(list)
     local seen = {}
     local catalog = {}
@@ -171,124 +231,6 @@ function craft.catalog(list)
     return catalog
 end
 
-local function peripheralTypes(name)
-    local ok, ptype = pcall(peripheral.getType, name)
-    if not ok or not ptype then
-        return {}
-    end
-    if type(ptype) == "table" then
-        return ptype
-    end
-    return { ptype }
-end
-
-local function typeMatchesRecipe(ptype, recipe)
-    if not ptype then
-        return false
-    end
-    ptype = tostring(ptype)
-    if ptype == recipe.machine or ptype == recipe.base then
-        return true
-    end
-    local shortBase = recipe.base:match("([^:]+)$") or recipe.base
-    if ptype:find(shortBase, 1, true) then
-        return true
-    end
-    -- grow recipes: any electric greenhouse peripheral type
-    if recipe.flag == "grow" and ptype:lower():find("electric_greenhouse", 1, true) then
-        return true
-    end
-    return false
-end
-
-local function nameMatchesRecipe(name, recipe)
-    if name == recipe.machine or name == recipe.base then
-        return true
-    end
-    local prefix = recipe.base .. "_"
-    if name:sub(1, #prefix) == prefix then
-        return true
-    end
-    local shortBase = recipe.base:match("([^:]+)$") or recipe.base
-    if name:find(shortBase, 1, true) then
-        return true
-    end
-    if recipe.flag == "grow" and name:lower():find("greenhouse", 1, true) then
-        return true
-    end
-    return false
-end
-
---- Resolve a physical machine peripheral for a recipe.
--- Recipe suffix _N is preferred (circuit / instance), but any matching
--- greenhouse/machine on the network is accepted as fallback.
-function craft.resolveMachine(recipe)
-    local names = peripheral.getNames()
-    local matches = {}
-
-    for i = 1, #names do
-        local name = names[i]
-        local matched = nameMatchesRecipe(name, recipe)
-        if not matched then
-            local types = peripheralTypes(name)
-            for j = 1, #types do
-                if typeMatchesRecipe(types[j], recipe) then
-                    matched = true
-                    break
-                end
-            end
-        end
-        if matched then
-            matches[#matches + 1] = name
-        end
-    end
-
-    if #matches == 0 then
-        return nil
-    end
-
-    -- Prefer exact recipe.machine, then same numeric suffix, then stable order.
-    for i = 1, #matches do
-        if matches[i] == recipe.machine then
-            return matches[i]
-        end
-    end
-
-    if recipe.circuit ~= nil then
-        local suffix = "_" .. tostring(recipe.circuit)
-        for i = 1, #matches do
-            if matches[i]:sub(-#suffix) == suffix then
-                return matches[i]
-            end
-        end
-    end
-
-    table.sort(matches)
-    return matches[1]
-end
-
-local function countItem(invName, itemName)
-    local inv = peripheral.wrap(invName)
-    if not inv or not inv.list then
-        return 0
-    end
-    local total = 0
-    for _, item in pairs(inv.list()) do
-        if item.name == itemName then
-            total = total + item.count
-        end
-    end
-    return total
-end
-
-local function countAvailable(opts, itemName)
-    local total = countItem(opts.from, itemName)
-    if opts.out and opts.out ~= opts.from then
-        total = total + countItem(opts.out, itemName)
-    end
-    return total
-end
-
 local function isCraftableName(name)
     return name and name:sub(1, 1) ~= "#"
 end
@@ -304,7 +246,9 @@ local function runGrow(recipe, machine, opts)
     end
 
     local pullFrom = opts.pullFrom or machine
-    local outputs = pullItems(pullFrom, opts.out, recipe.outputs)
+    local store = opts.store
+    local out = opts.out or (store and store.main())
+    local outputs = pullOutputs(pullFrom, recipe.outputs, store, out, recipe)
     return true, {
         inputs = {},
         outputs = outputs,
@@ -315,15 +259,14 @@ local function runGrow(recipe, machine, opts)
     }
 end
 
---- Ensure `amount` of itemId exists in storage, recursively crafting/growing dependencies.
--- Fluids and tags are not auto-crafted.
 local function ensure(list, itemId, amount, opts, visiting, log)
     amount = math.max(0, math.floor(tonumber(amount) or 0))
     if amount <= 0 then
         return true
     end
 
-    local have = countAvailable(opts, itemId)
+    local store = opts.store
+    local have = countAvailable(store, itemId, opts)
     local need = amount - have
     if need <= 0 then
         return true
@@ -375,6 +318,7 @@ local function ensure(list, itemId, amount, opts, visiting, log)
             ok, detail = craft.run(recipe, {
                 from = opts.from,
                 out = opts.out,
+                store = store,
                 machine = machine,
                 pullFrom = opts.pullFrom,
                 waitTicks = opts.waitTicks,
@@ -395,7 +339,7 @@ local function ensure(list, itemId, amount, opts, visiting, log)
 
     visiting[itemId] = nil
 
-    have = countAvailable(opts, itemId)
+    have = countAvailable(store, itemId, opts)
     if have < amount then
         return false, {
             error = "craft_short",
@@ -407,19 +351,37 @@ local function ensure(list, itemId, amount, opts, visiting, log)
 end
 
 --- Craft/grow until at least `amount` of the output item is available.
--- Recursively resolves missing inputs via processing/craft/grow recipes.
--- opts.from / opts.out required. opts.growDuration = greenhouse seconds (default 10).
+-- opts.store = storage.load() result (preferred). Otherwise opts.from/out required.
 function craft.request(itemId, amount, opts)
-    assert(opts and opts.from and opts.out, "opts.from and opts.out required")
+    opts = opts or {}
     amount = math.max(1, math.floor(tonumber(amount) or 1))
 
+    local store = opts.store
+    if not store and opts.from and opts.out then
+        -- legacy single-inventory mode
+    elseif not store then
+        local storageMod = require("storage")
+        store = storageMod.load(opts.storageCfg)
+        opts.store = store
+    end
+
+    if store then
+        opts.from = opts.from or store.main()
+        opts.out = opts.out or store.main()
+        opts.growDuration = opts.growDuration or store.getNumber("grow_duration", DEFAULT_GROW_DURATION)
+        opts.waitTicks = opts.waitTicks or store.getNumber("wait_ticks", nil)
+    end
+
+    assert(opts.from and opts.out, "opts.from and opts.out (or opts.store) required")
+
     local list = craft.loadRequest(opts.cfg)
-    local before = countAvailable(opts, itemId)
+    local before = countAvailable(store, itemId, opts)
     local log = {}
 
     local ensureOpts = {
         from = opts.from,
         out = opts.out,
+        store = store,
         pullFrom = opts.pullFrom,
         waitTicks = opts.waitTicks,
         growDuration = opts.growDuration,
@@ -430,12 +392,12 @@ function craft.request(itemId, amount, opts)
     if not ok then
         return false, {
             error = err,
-            produced = math.max(0, countAvailable(opts, itemId) - before),
+            produced = math.max(0, countAvailable(store, itemId, opts) - before),
             steps = log,
         }
     end
 
-    local after = countAvailable(opts, itemId)
+    local after = countAvailable(store, itemId, opts)
     return true, {
         item = itemId,
         produced = after - before,
