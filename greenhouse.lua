@@ -1,23 +1,79 @@
--- Electric greenhouse control for grow recipes.
+-- Electric greenhouse control.
+-- Greenhouses stay disabled by default. A short enable pulse is enough for
+-- GregTech to finish one grow recipe after the machine is turned off again.
 
 local Greenhouse = {}
 
---- Enable a greenhouse for `duration` seconds, then disable it.
-function Greenhouse.runFor(machineName, duration)
-    local machine = peripheral.wrap(machineName)
+local DEFAULT_PULSE = 3 -- seconds; enough to latch one grow cycle
 
+local function wrapMachine(machineName)
+    local machine = peripheral.wrap(machineName)
     if not machine then
-        print("Ошибка: Теплица '" .. tostring(machineName) .. "' не найдена")
+        return nil, "Ошибка: Теплица '" .. tostring(machineName) .. "' не найдена"
+    end
+    if type(machine.setWorkingEnabled) ~= "function" then
+        return nil, "Ошибка: '" .. tostring(machineName) .. "' не поддерживает setWorkingEnabled"
+    end
+    return machine
+end
+
+function Greenhouse.setEnabled(machineName, enabled)
+    local machine, err = wrapMachine(machineName)
+    if not machine then
+        print(err)
+        return false
+    end
+    machine.setWorkingEnabled(enabled and true or false)
+    return true
+end
+
+--- Keep greenhouse off (default state).
+function Greenhouse.disable(machineName)
+    return Greenhouse.setEnabled(machineName, false)
+end
+
+function Greenhouse.enable(machineName)
+    return Greenhouse.setEnabled(machineName, true)
+end
+
+--- Brief on-pulse, then force off. Recipe continues to completion on its own.
+-- @param pulseSeconds how long to leave working enabled (default 3)
+function Greenhouse.pulse(machineName, pulseSeconds)
+    local machine, err = wrapMachine(machineName)
+    if not machine then
+        print(err)
         return false
     end
 
-    duration = duration or 10
+    pulseSeconds = tonumber(pulseSeconds) or DEFAULT_PULSE
+    if pulseSeconds < 1 then
+        pulseSeconds = DEFAULT_PULSE
+    end
 
     machine.setWorkingEnabled(true)
-    sleep(duration)
+    sleep(pulseSeconds)
     machine.setWorkingEnabled(false)
-
     return true
 end
+
+--- Disable every resolved grow machine (call on cleaner/craft startup).
+-- @param resolveFn function(recipe) -> peripheral name | nil
+-- @param growRecipes list of grow recipes
+function Greenhouse.disableAll(resolveFn, growRecipes)
+    if type(resolveFn) ~= "function" or type(growRecipes) ~= "table" then
+        return
+    end
+    local seen = {}
+    for i = 1, #growRecipes do
+        local name = resolveFn(growRecipes[i])
+        if name and not seen[name] then
+            seen[name] = true
+            Greenhouse.disable(name)
+        end
+    end
+end
+
+-- Back-compat alias used by older callers
+Greenhouse.runFor = Greenhouse.pulse
 
 return Greenhouse

@@ -164,16 +164,21 @@ local function cleanGreenhouse(store, growRecipes, recipe)
 end
 
 local function main()
+    local greenhouse = require("greenhouse")
     local store = storage.load()
     local all = recipes.load()
     local growRecipes = recipes.byFlag(all, "grow")
     local interval = store.getNumber("clean_interval", 2)
 
-    print(("greenhouse_clean: %s grow recipes, interval %ss"):format(
+    -- Default state: all greenhouses off. Cleaner only moves items from buses.
+    greenhouse.disableAll(peripherals.resolveMachine, growRecipes)
+
+    print(("greenhouse_clean: %s grow recipes, interval %ss (GH off)"):format(
         tostring(#growRecipes), tostring(interval)
     ))
 
     while true do
+        greenhouse.disableAll(peripherals.resolveMachine, growRecipes)
         drainOverflow(store, growRecipes)
         for i = 1, #growRecipes do
             local ok, err = pcall(cleanGreenhouse, store, growRecipes, growRecipes[i])

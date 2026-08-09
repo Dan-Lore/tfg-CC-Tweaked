@@ -10,7 +10,8 @@ local CONFIG = {
     monitor = store.get("monitor", "right"),
     textScale = store.getNumber("text_scale", 0.5),
     waitTicks = store.getNumber("wait_ticks", 100),
-    growDuration = store.getNumber("grow_duration", 10),
+    growPulse = store.getNumber("grow_pulse", 3),
+    growWaitTimeout = store.getNumber("grow_wait_timeout", 600),
     maxAmount = store.getNumber("max_amount", 64),
 }
 
@@ -124,6 +125,9 @@ local function formatError(detail)
         end
         if err.error == "grow_failed" then
             return "GROW FAIL " .. short(err.missing and err.missing.name or "?")
+        end
+        if err.error == "grow_timeout" then
+            return "GROW WAIT " .. short(err.missing and err.missing.name or "?")
         end
         if err.error == "cycle" then
             return "CYCLE " .. short(err.missing and err.missing.name or "?")
@@ -268,7 +272,8 @@ local function doCraft()
     local ok, detail = craft.request(entry.id, state.amount, {
         store = store,
         waitTicks = CONFIG.waitTicks,
-        growDuration = CONFIG.growDuration,
+        growPulse = CONFIG.growPulse,
+        growWaitTimeout = CONFIG.growWaitTimeout,
     })
 
     state.busy = false

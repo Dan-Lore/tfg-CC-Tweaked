@@ -9,7 +9,8 @@ local peripherals = require("peripherals")
 local craft = {}
 
 local DEFAULT_CFG = "recipes.cfg"
-local DEFAULT_GROW_DURATION = 10 -- seconds
+local DEFAULT_GROW_PULSE = 3 -- seconds on; enough to latch one grow cycle
+local DEFAULT_GROW_WAIT = 600 -- max seconds to wait for bus output after pulse
 
 craft.resolveMachine = peripherals.resolveMachine
 
@@ -235,9 +236,42 @@ local function isCraftableName(name)
     return name and name:sub(1, 1) ~= "#"
 end
 
+local function growPullFrom(recipe, machine, opts)
+    local store = opts.store
+    if opts.pullFrom then
+        return opts.pullFrom
+    end
+    if store then
+        local bus = store.outputBus(recipe.circuit or 0)
+        if bus and peripheral.isPresent(bus) then
+            return bus
+        end
+    end
+    return machine
+end
+
+local function primaryGrowOutput(recipe)
+    for i = 1, #recipe.outputs do
+        if not recipe.outputs[i].fluid then
+            return recipe.outputs[i]
+        end
+    end
+    return nil
+end
+
+--- Pulse greenhouse briefly (default off), wait until one craft appears on the bus, pull it.
 local function runGrow(recipe, machine, opts)
-    local duration = opts.growDuration or DEFAULT_GROW_DURATION
-    local ok = greenhouse.runFor(machine, duration)
+    local pulse = opts.growPulse or DEFAULT_GROW_PULSE
+    local waitTimeout = opts.growWaitTimeout or DEFAULT_GROW_WAIT
+    local store = opts.store
+    local pullFrom = growPullFrom(recipe, machine, opts)
+    local outStack = primaryGrowOutput(recipe)
+    local before = outStack and countItem(pullFrom, outStack.name) or 0
+    local need = outStack and outStack.count or 1
+
+    -- Always leave machine off after the pulse.
+    local ok = greenhouse.pulse(machine, pulse)
+    greenhouse.disable(machine)
     if not ok then
         return false, {
             error = "grow_failed",
@@ -245,16 +279,27 @@ local function runGrow(recipe, machine, opts)
         }
     end
 
-    local store = opts.store
-    -- Prefer configured output bus (gtceu:mv_output_bus_N), then machine inventory.
-    local pullFrom = opts.pullFrom
-    if not pullFrom and store then
-        local bus = store.outputBus(recipe.circuit or 0)
-        if bus and peripheral.isPresent(bus) then
-            pullFrom = bus
+    local deadline = os.clock() + waitTimeout
+    local ready = false
+    while os.clock() < deadline do
+        greenhouse.disable(machine)
+        if outStack and countItem(pullFrom, outStack.name) >= before + need then
+            ready = true
+            break
         end
+        sleep(1)
     end
-    pullFrom = pullFrom or machine
+
+    greenhouse.disable(machine)
+
+    if outStack and not ready then
+        return false, {
+            error = "grow_timeout",
+            missing = { name = outStack.name, count = need },
+            machine = machine,
+        }
+    end
+
     local out = opts.out or (store and store.main())
     local outputs = pullOutputs(pullFrom, recipe.outputs, store, out, recipe)
     return true, {
@@ -263,7 +308,7 @@ local function runGrow(recipe, machine, opts)
         machine = recipe.machine,
         circuit = recipe.circuit,
         flag = "grow",
-        duration = duration,
+        pulse = pulse,
     }
 end
 
@@ -376,7 +421,8 @@ function craft.request(itemId, amount, opts)
     if store then
         opts.from = opts.from or store.main()
         opts.out = opts.out or store.main()
-        opts.growDuration = opts.growDuration or store.getNumber("grow_duration", DEFAULT_GROW_DURATION)
+        opts.growPulse = opts.growPulse or store.getNumber("grow_pulse", DEFAULT_GROW_PULSE)
+        opts.growWaitTimeout = opts.growWaitTimeout or store.getNumber("grow_wait_timeout", DEFAULT_GROW_WAIT)
         opts.waitTicks = opts.waitTicks or store.getNumber("wait_ticks", nil)
     end
 
@@ -392,7 +438,8 @@ function craft.request(itemId, amount, opts)
         store = store,
         pullFrom = opts.pullFrom,
         waitTicks = opts.waitTicks,
-        growDuration = opts.growDuration,
+        growPulse = opts.growPulse,
+        growWaitTimeout = opts.growWaitTimeout,
         cfg = opts.cfg,
     }
 
