@@ -161,6 +161,29 @@ local function findMissingInputs(recipe, store, opts, times)
     return missing
 end
 
+--- Missing inputs that cannot be crafted further (fluids, tags, no recipe).
+local function hardMissingInputs(list, missingList)
+    local hard = {}
+    if not missingList then
+        return hard
+    end
+    for i = 1, #missingList do
+        local m = missingList[i]
+        local leaf = false
+        if m.fluid or m.tag or m.error == "no_fluid_source" then
+            leaf = true
+        elseif not isCraftableName(m.name) then
+            leaf = true
+        elseif not list or not craft.findByOutput(list, m.name) then
+            leaf = true
+        end
+        if leaf then
+            hard[#hard + 1] = m
+        end
+    end
+    return hard
+end
+
 ---------------------------------------------------------------------------
 -- Feed: balanced set-by-set push + rollback
 ---------------------------------------------------------------------------
@@ -1037,6 +1060,31 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
             end
         end
 
+        local function isSoftEnsureErr(err)
+            if type(err) ~= "table" then
+                return false
+            end
+            local e = err
+            -- craft.request wraps as { error = inner }; ensure may return inner directly
+            for _ = 1, 3 do
+                if type(e) ~= "table" then
+                    break
+                end
+                if e.error == "craft_short" then
+                    return true
+                end
+                if e.error == "missing_input" and e.missing then
+                    return #hardMissingInputs(list, { e.missing }) == 0
+                end
+                if type(e.error) == "table" then
+                    e = e.error
+                else
+                    break
+                end
+            end
+            return false
+        end
+
         local function producerGather()
             while not shouldStop() do
                 local rem = remainingRuns()
@@ -1052,18 +1100,23 @@ ensure = function(list, itemId, amount, opts, visiting, log, cancelled)
                         list, recipe, wantSets, opts, visiting, log, cancelled
                     )
                     if not okIn then
-                        stop[1] = true
-                        stop[2] = errIn
-                        return
-                    end
-                    if countCompleteSets(recipe, store, opts) < 1 and not shouldStop() then
+                        if isSoftEnsureErr(errIn) then
+                            sleep(0.25)
+                        else
+                            stop[1] = true
+                            stop[2] = errIn
+                            return
+                        end
+                    elseif countCompleteSets(recipe, store, opts) < 1 and not shouldStop() then
+                        -- Empty after ensure: often consumed by oven. Abort only on leaf shortages.
                         local stillMissing = findMissingInputs(recipe, store, opts, 1)
-                        if #stillMissing > 0 then
+                        local hard = hardMissingInputs(list, stillMissing)
+                        if #hard > 0 then
                             stop[1] = true
                             stop[2] = {
                                 error = "missing_input",
-                                missing = stillMissing[1],
-                                missing_all = stillMissing,
+                                missing = hard[1],
+                                missing_all = hard,
                             }
                             return
                         end
