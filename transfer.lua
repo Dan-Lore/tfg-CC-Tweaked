@@ -1,4 +1,4 @@
-local function transfer(from, to, itemName, amount)
+local function transferItems(from, to, itemName, amount)
     local source = assert(peripheral.wrap(from), "Source not found: " .. from)
     local movedTotal = 0
     local moveAll = amount == -1
@@ -15,6 +15,13 @@ local function transfer(from, to, itemName, amount)
 
     return movedTotal
 end
+
+-- Callable table: transfer(from, to, item, amount) + transfer.countFluid / transfer.fluid
+local transfer = setmetatable({}, {
+    __call = function(_, from, to, itemName, amount)
+        return transferItems(from, to, itemName, amount)
+    end,
+})
 
 --- Count millibuckets of a concrete fluid in a tank peripheral.
 function transfer.countFluid(tankName, fluidName)
