@@ -11,8 +11,28 @@ local craft = {}
 local DEFAULT_CFG = "recipes.cfg"
 local DEFAULT_GROW_PULSE = 3 -- seconds on; enough to latch one grow cycle
 local DEFAULT_GROW_WAIT = 600 -- max seconds to wait for bus output after pulse
+local DEFAULT_CRAFT_WAIT = 300 -- max seconds to wait for one processing cycle
 
 craft.resolveMachine = peripherals.resolveMachine
+
+-- Serialize access to the same machine peripheral across parallel ensures.
+local machineLocks = {}
+
+local function withMachineLock(machine, fn)
+    while machineLocks[machine] do
+        sleep(0.25)
+    end
+    machineLocks[machine] = true
+    local ok, a, b = pcall(fn)
+    machineLocks[machine] = nil
+    if not ok then
+        return false, {
+            error = "exception",
+            missing = { name = tostring(a), count = 1 },
+        }
+    end
+    return a, b
+end
 
 local function countItem(invName, itemName)
     local inv = peripheral.wrap(invName)
@@ -63,6 +83,20 @@ local function isCraftableName(name)
     return name and name:sub(1, 1) ~= "#"
 end
 
+local function scaleStacks(stacks, times)
+    times = math.max(1, math.floor(tonumber(times) or 1))
+    local out = {}
+    for i = 1, #stacks do
+        local s = stacks[i]
+        out[i] = {
+            name = s.name,
+            count = s.count * times,
+            fluid = s.fluid,
+        }
+    end
+    return out
+end
+
 local function countFluidAvailable(store, fluidOrTag)
     if not store then
         return 0, nil
@@ -77,46 +111,47 @@ local function countFluidAvailable(store, fluidOrTag)
     return transfer.countFluid(info.peripheral, info.fluid), info
 end
 
---- List missing inputs for one craft run (items + fluids). Does not recurse.
+--- List missing inputs for `times` craft runs (items + fluids). Does not recurse.
 -- Fluids are listed first so UI/errors surface tank issues before mid-chain items.
-local function findMissingInputs(recipe, store, opts)
+local function findMissingInputs(recipe, store, opts, times)
+    times = math.max(1, math.floor(tonumber(times) or 1))
     local fluids = {}
     local items = {}
     for i = 1, #recipe.inputs do
         local input = recipe.inputs[i]
+        local need = input.count * times
         if input.fluid then
             local have, info = countFluidAvailable(store, input.name)
             if not info then
                 fluids[#fluids + 1] = {
                     name = input.name,
-                    count = input.count,
+                    count = need,
                     fluid = true,
                     error = "no_fluid_source",
                 }
-            elseif have < input.count then
+            elseif have < need then
                 fluids[#fluids + 1] = {
                     name = input.name,
-                    count = input.count - have,
+                    count = need - have,
                     fluid = true,
                 }
             end
         elseif isCraftableName(input.name) then
             local have = countAvailable(store, input.name, opts)
-            if have < input.count then
+            if have < need then
                 items[#items + 1] = {
                     name = input.name,
-                    count = input.count - have,
+                    count = need - have,
                     fluid = false,
                 }
             end
         else
-            -- Item tags (#...) are not auto-resolved; report as missing unless sourced.
             local from = store and store.sourceOf(input.name)
             local have = (from and countItem(from, input.name)) or 0
-            if have < input.count then
+            if have < need then
                 items[#items + 1] = {
                     name = input.name,
-                    count = input.count - have,
+                    count = need - have,
                     fluid = false,
                     tag = true,
                 }
@@ -135,7 +170,6 @@ end
 
 --- Pull item + fluid inputs into the machine. Fails before any move if something is missing.
 local function pushInputs(stacks, machine, store, fallbackFrom)
-    -- Dry-run availability for fluids (items assumed ensured by caller).
     for i = 1, #stacks do
         local stack = stacks[i]
         if stack.fluid then
@@ -198,7 +232,6 @@ local function outputDest(store, recipe, itemName, fallbackOut)
     end
     if recipe and recipe.flag == "grow" then
         local seedItem = store.seedForCrop(itemName)
-        -- Basil-like: crop id is also the "seed" → seed chest, not fridge.
         if seedItem and seedItem == itemName and recipe.circuit ~= nil then
             return store.seedDest(recipe.circuit)
         end
@@ -224,6 +257,42 @@ local function pullOutputs(from, stacks, store, fallbackOut, recipe)
         end
     end
     return moved
+end
+
+local function craftWaitTimeout(opts, times)
+    times = math.max(1, math.floor(tonumber(times) or 1))
+    local base = opts and opts.craftWaitTimeout
+    if not base and opts and opts.waitTicks and opts.waitTicks > 0 then
+        base = opts.waitTicks / 20
+    end
+    base = tonumber(base) or DEFAULT_CRAFT_WAIT
+    return base * times
+end
+
+local function waitForOutputs(pullFrom, outputs, beforeCounts, timeout)
+    local deadline = os.clock() + timeout
+    while os.clock() < deadline do
+        local ready = true
+        local anyItem = false
+        for i = 1, #outputs do
+            local o = outputs[i]
+            if not o.fluid then
+                anyItem = true
+                if countItem(pullFrom, o.name) < (beforeCounts[o.name] or 0) + o.count then
+                    ready = false
+                    break
+                end
+            end
+        end
+        if anyItem and ready then
+            return true
+        end
+        if not anyItem then
+            return true
+        end
+        sleep(0.5)
+    end
+    return false
 end
 
 function craft.load(path)
@@ -275,7 +344,11 @@ function craft.run(recipe, opts)
         return false, "use craft.request for grow recipes"
     end
 
-    local missingList = findMissingInputs(recipe, store, opts)
+    local times = math.max(1, math.floor(tonumber(opts.times) or 1))
+    local inputs = scaleStacks(recipe.inputs, times)
+    local outputs = scaleStacks(recipe.outputs, times)
+
+    local missingList = findMissingInputs(recipe, store, opts, times)
     if #missingList > 0 then
         return false, {
             error = "missing_input",
@@ -284,7 +357,7 @@ function craft.run(recipe, opts)
         }
     end
 
-    local ok, moved, missing = pushInputs(recipe.inputs, opts.machine, store, from)
+    local ok, moved, missing = pushInputs(inputs, opts.machine, store, from)
     if not ok then
         return false, {
             error = "missing_input",
@@ -295,50 +368,37 @@ function craft.run(recipe, opts)
 
     local pullFrom = opts.pullFrom or opts.machine
     local beforeCounts = {}
-    for i = 1, #recipe.outputs do
-        local o = recipe.outputs[i]
+    for i = 1, #outputs do
+        local o = outputs[i]
         if not o.fluid then
             beforeCounts[o.name] = countItem(pullFrom, o.name)
         end
     end
 
-    if opts.waitTicks and opts.waitTicks > 0 then
-        sleep(opts.waitTicks / 20)
-    else
-        sleep(1)
-    end
-
-    local produced = false
-    for i = 1, #recipe.outputs do
-        local o = recipe.outputs[i]
-        if not o.fluid then
-            local have = countItem(pullFrom, o.name)
-            if have >= (beforeCounts[o.name] or 0) + o.count then
-                produced = true
-                break
-            end
-        end
-    end
-
-    if not produced then
+    local timeout = craftWaitTimeout(opts, times)
+    local ready = waitForOutputs(pullFrom, outputs, beforeCounts, timeout)
+    if not ready then
+        local primary = outputs[1]
         return false, {
-            error = "craft_no_output",
-            missing = recipe.outputs[1] and {
-                name = recipe.outputs[1].name,
-                count = recipe.outputs[1].count,
+            error = "craft_timeout",
+            missing = primary and {
+                name = primary.name,
+                count = primary.count,
             } or { name = recipe.machine, count = 1 },
-            hint = "machine did not produce output (check fluids/power/circuit)",
+            hint = "machine did not finish in time (check power/circuit/fluids)",
+            times = times,
         }
     end
 
-    local outputs = pullOutputs(pullFrom, recipe.outputs, store, out, recipe)
+    local pulled = pullOutputs(pullFrom, outputs, store, out, recipe)
 
     return true, {
         inputs = moved,
-        outputs = outputs,
+        outputs = pulled,
         machine = recipe.machine,
         circuit = recipe.circuit,
         flag = recipe.flag,
+        times = times,
     }
 end
 
@@ -419,7 +479,6 @@ local function runGrow(recipe, machine, opts)
     local before = outStack and countItem(pullFrom, outStack.name) or 0
     local need = outStack and outStack.count or 1
 
-    -- Always leave machine off after the pulse.
     local ok = greenhouse.pulse(machine, pulse)
     greenhouse.disable(machine)
     if not ok then
@@ -462,7 +521,60 @@ local function runGrow(recipe, machine, opts)
     }
 end
 
-local function ensure(list, itemId, amount, opts, visiting, log)
+local ensure
+
+--- Ensure craftable item inputs for `runs` recipe cycles (parallel when multiple).
+local function ensureInputsParallel(list, recipe, runs, opts, visiting, log)
+    local jobs = {}
+    for i = 1, #recipe.inputs do
+        local input = recipe.inputs[i]
+        if not input.fluid and isCraftableName(input.name) then
+            local want = input.count * runs
+            local have = countAvailable(opts.store, input.name, opts)
+            if have < want then
+                jobs[#jobs + 1] = {
+                    name = input.name,
+                    amount = want,
+                }
+            end
+        end
+    end
+
+    if #jobs == 0 then
+        return true
+    end
+
+    if #jobs == 1 then
+        return ensure(list, jobs[1].name, jobs[1].amount, opts, visiting, log)
+    end
+
+    local firstErr = nil
+    local funcs = {}
+    for i = 1, #jobs do
+        local job = jobs[i]
+        funcs[i] = function()
+            if firstErr then
+                return
+            end
+            local localVisiting = {}
+            for k, v in pairs(visiting) do
+                localVisiting[k] = v
+            end
+            local ok, err = ensure(list, job.name, job.amount, opts, localVisiting, log)
+            if not ok and not firstErr then
+                firstErr = err
+            end
+        end
+    end
+
+    parallel.waitForAll(table.unpack(funcs))
+    if firstErr then
+        return false, firstErr
+    end
+    return true
+end
+
+ensure = function(list, itemId, amount, opts, visiting, log)
     amount = math.max(0, math.floor(tonumber(amount) or 0))
     if amount <= 0 then
         return true
@@ -502,53 +614,76 @@ local function ensure(list, itemId, amount, opts, visiting, log)
     visiting[itemId] = true
     local runs = math.ceil(need / outStack.count)
 
-    for _ = 1, runs do
-        -- 1) Recurse into craftable item inputs first.
-        for i = 1, #recipe.inputs do
-            local input = recipe.inputs[i]
-            if not input.fluid and isCraftableName(input.name) then
-                local ok, err = ensure(list, input.name, input.count, opts, visiting, log)
-                if not ok then
-                    visiting[itemId] = nil
-                    return false, err
-                end
+    local function fail(err)
+        visiting[itemId] = nil
+        return false, err
+    end
+
+    if recipe.flag == "grow" then
+        for _ = 1, runs do
+            local okIn, errIn = ensureInputsParallel(list, recipe, 1, opts, visiting, log)
+            if not okIn then
+                return fail(errIn)
             end
+
+            local stillMissing = findMissingInputs(recipe, store, opts, 1)
+            if #stillMissing > 0 then
+                return fail({
+                    error = "missing_input",
+                    missing = stillMissing[1],
+                    missing_all = stillMissing,
+                })
+            end
+
+            local ok, detail = withMachineLock(machine, function()
+                return runGrow(recipe, machine, opts)
+            end)
+            if not ok then
+                return fail(detail)
+            end
+            log[#log + 1] = {
+                item = itemId,
+                machine = machine,
+                flag = recipe.flag,
+                detail = detail,
+            }
+        end
+    else
+        local okIn, errIn = ensureInputsParallel(list, recipe, runs, opts, visiting, log)
+        if not okIn then
+            return fail(errIn)
         end
 
-        -- 2) Refuse to start if anything is still missing (fluids, items, tags).
-        local stillMissing = findMissingInputs(recipe, store, opts)
+        local stillMissing = findMissingInputs(recipe, store, opts, runs)
         if #stillMissing > 0 then
-            visiting[itemId] = nil
-            return false, {
+            return fail({
                 error = "missing_input",
                 missing = stillMissing[1],
                 missing_all = stillMissing,
-            }
+            })
         end
 
-        local ok, detail
-        if recipe.flag == "grow" then
-            ok, detail = runGrow(recipe, machine, opts)
-        else
-            ok, detail = craft.run(recipe, {
+        local ok, detail = withMachineLock(machine, function()
+            return craft.run(recipe, {
                 from = opts.from,
                 out = opts.out,
                 store = store,
                 machine = machine,
                 pullFrom = opts.pullFrom,
                 waitTicks = opts.waitTicks,
+                craftWaitTimeout = opts.craftWaitTimeout,
+                times = runs,
             })
-        end
-
+        end)
         if not ok then
-            visiting[itemId] = nil
-            return false, detail
+            return fail(detail)
         end
         log[#log + 1] = {
             item = itemId,
             machine = machine,
             flag = recipe.flag,
             detail = detail,
+            times = runs,
         }
     end
 
@@ -585,6 +720,7 @@ function craft.request(itemId, amount, opts)
         opts.out = opts.out or store.main()
         opts.growPulse = opts.growPulse or store.getNumber("grow_pulse", DEFAULT_GROW_PULSE)
         opts.growWaitTimeout = opts.growWaitTimeout or store.getNumber("grow_wait_timeout", DEFAULT_GROW_WAIT)
+        opts.craftWaitTimeout = opts.craftWaitTimeout or store.getNumber("craft_wait_timeout", DEFAULT_CRAFT_WAIT)
         opts.waitTicks = opts.waitTicks or store.getNumber("wait_ticks", nil)
     end
 
@@ -600,6 +736,7 @@ function craft.request(itemId, amount, opts)
         store = store,
         pullFrom = opts.pullFrom,
         waitTicks = opts.waitTicks,
+        craftWaitTimeout = opts.craftWaitTimeout or DEFAULT_CRAFT_WAIT,
         growPulse = opts.growPulse,
         growWaitTimeout = opts.growWaitTimeout,
         cfg = opts.cfg,

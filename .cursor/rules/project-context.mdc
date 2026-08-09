@@ -27,3 +27,4 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - Non-fridge items (e.g. `firmalife:spice/basil_leaves`) use `route` → `overflow` in `storage.cfg`; cleaner drains overflow first
 - Greenhouse products are pulled from `output_bus_prefix` + circuit (default `gtceu:mv_output_bus_N`), not from the greenhouse controller block
 - Fluids use `fluid_source | tagOrFluid | tank | concreteFluid` in `storage.cfg` (e.g. `#tfg:clean_water` → `gtceu:lv_super_tank_1` / `minecraft:water`); craft refuses to start if any input (item or fluid) is missing
+- Processing crafts in batches (`times=N` one push/poll/pull); waits by polling until `craft_wait_timeout` (scaled by batch); sibling inputs run in parallel with a per-machine lock; UI amount ±1/±10 (1–100)

@@ -9,10 +9,10 @@ local store = storage.load()
 local CONFIG = {
     monitor = store.get("monitor", "right"),
     textScale = store.getNumber("text_scale", 0.5),
-    waitTicks = store.getNumber("wait_ticks", 100),
+    craftWaitTimeout = store.getNumber("craft_wait_timeout", 300),
     growPulse = store.getNumber("grow_pulse", 3),
     growWaitTimeout = store.getNumber("grow_wait_timeout", 600),
-    maxAmount = store.getNumber("max_amount", 64),
+    maxAmount = store.getNumber("max_amount", 100),
 }
 
 local mon = assert(peripheral.wrap(CONFIG.monitor), "No monitor on " .. CONFIG.monitor)
@@ -150,6 +150,9 @@ local function formatError(detail)
         if err.error == "craft_no_output" then
             return "NO OUT " .. prettyName(err.missing and err.missing.name or "?")
         end
+        if err.error == "craft_timeout" then
+            return "WAIT " .. prettyName(err.missing and err.missing.name or "?")
+        end
         if err.error == "cycle" then
             return "CYCLE " .. prettyName(err.missing and err.missing.name or "?")
         end
@@ -269,24 +272,28 @@ local function draw()
     end
 
     local y = H - 1
-    local btnW = math.max(3, math.floor(W / 3))
-    local gap = W - btnW * 3
-    local xMinus = 1
-    local xPlus = 1 + btnW + math.floor(gap / 2)
-    local xGo = W - btnW + 1
-
-    fill(xMinus, y, btnW, 2, colors.red)
-    writeAt(xMinus + math.floor((btnW - 1) / 2), y, "-", colors.white, colors.red)
-    addButton("minus", xMinus, y, btnW, 2, "-", colors.white, colors.red)
-
-    fill(xPlus, y, btnW, 2, colors.green)
-    writeAt(xPlus + math.floor((btnW - 1) / 2), y, "+", colors.white, colors.green)
-    addButton("plus", xPlus, y, btnW, 2, "+", colors.white, colors.green)
-
-    fill(xGo, y, btnW, 2, colors.orange)
-    local goLabel = state.busy and ".." or "GO"
-    writeAt(xGo + math.floor((btnW - #goLabel) / 2), y, goLabel, colors.black, colors.orange)
-    addButton("craft", xGo, y, btnW, 2, goLabel, colors.black, colors.orange)
+    -- -10 | -1 | GO | +1 | +10
+    local nBtn = 5
+    local baseW = math.max(2, math.floor(W / nBtn))
+    local specs = {
+        { id = "minus10", label = "-10", bg = colors.red, fg = colors.white },
+        { id = "minus", label = "-1", bg = colors.red, fg = colors.white },
+        { id = "craft", label = state.busy and ".." or "GO", bg = colors.orange, fg = colors.black },
+        { id = "plus", label = "+1", bg = colors.green, fg = colors.white },
+        { id = "plus10", label = "+10", bg = colors.green, fg = colors.white },
+    }
+    for i = 1, #specs do
+        local s = specs[i]
+        local x = 1 + (i - 1) * baseW
+        local w = (i == #specs) and (W - x + 1) or baseW
+        fill(x, y, w, 2, s.bg)
+        local label = s.label
+        if #label > w then
+            label = label:sub(1, w)
+        end
+        writeAt(x + math.floor((w - #label) / 2), y, label, s.fg, s.bg)
+        addButton(s.id, x, y, w, 2, label, s.fg, s.bg)
+    end
 end
 
 local function doCraft()
@@ -313,7 +320,7 @@ local function doCraft()
 
     local ok, detail = craft.request(entry.id, state.amount, {
         store = store,
-        waitTicks = CONFIG.waitTicks,
+        craftWaitTimeout = CONFIG.craftWaitTimeout,
         growPulse = CONFIG.growPulse,
         growWaitTimeout = CONFIG.growWaitTimeout,
     })
@@ -343,6 +350,12 @@ local function onTouch(x, y)
         return
     end
 
+    if btn.id == "minus10" then
+        state.amount = clamp(state.amount - 10, 1, CONFIG.maxAmount)
+        draw()
+        return
+    end
+
     if btn.id == "minus" then
         state.amount = clamp(state.amount - 1, 1, CONFIG.maxAmount)
         draw()
@@ -351,6 +364,12 @@ local function onTouch(x, y)
 
     if btn.id == "plus" then
         state.amount = clamp(state.amount + 1, 1, CONFIG.maxAmount)
+        draw()
+        return
+    end
+
+    if btn.id == "plus10" then
+        state.amount = clamp(state.amount + 10, 1, CONFIG.maxAmount)
         draw()
         return
     end
