@@ -1,4 +1,6 @@
 -- Goal stack + resource monitor: craft root amount via crafted counter.
+-- Non-oneshot processing: batch max complete sets (min resource); oneshot/grow: 1.
+-- Same recipe on a busy machine stacks (queues); different recipe waits elsewhere.
 
 local transfer = require("transfer")
 local recipes = require("recipes")
@@ -19,14 +21,24 @@ local function emitProgress(opts, done, total)
     end
 end
 
-local function activityText(recipe, itemId)
+local function activityText(recipe, itemId, times)
+    times = math.max(1, math.floor(tonumber(times) or 1))
     local out = recipes.primaryOutput(recipe)
-    local n = out and out.count or 1
+    local n = (out and out.count or 1) * times
     local name = itemId:match("([^/]+)$") or itemId
     if recipe.flag == "grow" then
         return "grow " .. name .. " x" .. tostring(n)
     end
     return name .. " x" .. tostring(n)
+end
+
+--- How many recipe runs to push now.
+-- oneshot / grow → 1; else min(stock complete sets, runs still needed).
+local function batchTimes(recipe, ready, runsWanted)
+    if recipe.flag == "grow" or recipe.oneshot == true then
+        return 1
+    end
+    return math.max(1, math.min(ready, runsWanted))
 end
 
 --- deps: findByOutput(list,id), resolveMachine(recipe), run(recipe,opts), runGrow(recipe,machine,opts)
@@ -126,7 +138,9 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
             local ready = craft_stock.countCompleteSets(recipe, store, opts)
             if ready >= 1 then
                 local machine = deps.resolveMachine(recipe)
-                if machine and not machine_lock.isBusy(machine) and not seenMachine[machine] then
+                local recipeKey = recipes.recipeKey(recipe)
+                -- Free, or same recipe already on machine (stack/queue).
+                if machine and machine_lock.canStack(machine, recipeKey) and not seenMachine[machine] then
                     local should = isRoot or (have < wantUnits)
                     if should then
                         seenMachine[machine] = true
@@ -135,8 +149,10 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                             recipe = recipe,
                             outStack = outStack,
                             machine = machine,
-                            recipeKey = recipes.recipeKey(recipe),
+                            recipeKey = recipeKey,
                             isRoot = isRoot,
+                            runsWanted = runsWanted,
+                            times = batchTimes(recipe, ready, runsWanted),
                         }
                     end
                 end
@@ -149,12 +165,32 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
         return candidates, hard
     end
 
+    local function runsStillNeeded(job)
+        local per = job.outStack.count
+        if job.isRoot then
+            return math.ceil(math.max(0, rootWant - rootCrafted) / per)
+        end
+        local have = craft_stock.countAvailable(store, job.itemId, opts)
+        -- Cap by what gather asked for this tick (avoid overproducing siblings).
+        local wantUnits = job.runsWanted * per
+        local still = math.max(0, wantUnits - have)
+        return math.ceil(still / per)
+    end
+
     local function runOne(job)
-        emitActivity(opts, activityText(job.recipe, job.itemId))
-        local ok, detail = machine_lock.tryLock(job.machine, job.recipeKey, function()
+        local times = job.times or 1
+        emitActivity(opts, activityText(job.recipe, job.itemId, times))
+        local ok, detail = machine_lock.runOrStack(job.machine, job.recipeKey, function()
             if job.recipe.flag == "grow" then
                 return deps.runGrow(job.recipe, job.machine, opts)
             end
+            -- Recompute batch under lock (stock / progress may have changed while queued).
+            local runsLeft = runsStillNeeded(job)
+            local ready = craft_stock.countCompleteSets(job.recipe, store, opts)
+            if ready < 1 or runsLeft < 1 then
+                return false, { error = "skipped", skipped = true }
+            end
+            local batch = batchTimes(job.recipe, ready, runsLeft)
             return deps.run(job.recipe, {
                 from = opts.from,
                 out = opts.out,
@@ -163,7 +199,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 pullFrom = opts.pullFrom,
                 waitTicks = opts.waitTicks,
                 craftWaitTimeout = opts.craftWaitTimeout,
-                times = 1,
+                times = batch,
             })
         end)
 
@@ -171,6 +207,9 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
             return true
         end
         if not ok then
+            if detail and detail.skipped then
+                return true
+            end
             return false, detail
         end
         if detail and detail.skipped then
@@ -194,7 +233,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
             machine = job.machine,
             flag = job.recipe.flag,
             detail = detail,
-            times = 1,
+            times = (detail and detail.sets_pushed) or times,
         }
         return true
     end

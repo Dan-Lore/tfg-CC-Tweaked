@@ -1,4 +1,5 @@
 -- Exclusive peripheral locks shared across craft / miller on the same computer.
+-- Same recipeKey can queue (stack); different crafts wait for the machine to free.
 
 local machine_lock = {}
 
@@ -8,11 +9,28 @@ function machine_lock.isBusy(machine)
     return machine ~= nil and locks[machine] ~= nil
 end
 
+function machine_lock.keyOf(machine)
+    local lock = machine and locks[machine]
+    return lock and lock.key or nil
+end
+
 function machine_lock.busyAny()
     for _ in pairs(locks) do
         return true
     end
     return false
+end
+
+--- True if free, or held by the same recipe (caller may queue/stack).
+function machine_lock.canStack(machine, recipeKey)
+    if not machine then
+        return false
+    end
+    local lock = locks[machine]
+    if not lock then
+        return true
+    end
+    return lock.key == (recipeKey or "unknown")
 end
 
 --- Wait until free, then run fn under lock.
@@ -55,6 +73,23 @@ function machine_lock.tryLock(machine, recipeKey, fn)
         }
     end
     return a, b
+end
+
+--- If free → tryLock; if same recipe already running → withLock (stack/queue).
+-- Different recipe holding the machine → busy (do not steal).
+function machine_lock.runOrStack(machine, recipeKey, fn)
+    recipeKey = recipeKey or "unknown"
+    if not machine then
+        return false, { error = "no_machine" }
+    end
+    local lock = locks[machine]
+    if not lock then
+        return machine_lock.tryLock(machine, recipeKey, fn)
+    end
+    if lock.key == recipeKey then
+        return machine_lock.withLock(machine, recipeKey, fn)
+    end
+    return false, { error = "busy" }
 end
 
 return machine_lock
