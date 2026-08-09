@@ -325,8 +325,15 @@ function craft_io.run(recipe, opts)
         return true, detail
     end
 
+    local function emitSetsProgress()
+        if opts and type(opts.onSetsProgress) == "function" then
+            pcall(opts.onSetsProgress, setsPushed, targetSets, pulled)
+        end
+    end
+
     while os.clock() < deadline do
         craft_io.drainToward(pullFrom, need, pulled, store, out, recipe)
+        emitSetsProgress()
         if outputsComplete() then
             return finishOk()
         end
@@ -339,6 +346,7 @@ function craft_io.run(recipe, opts)
                 for k, v in pairs(moved) do
                     movedTotals[k] = (movedTotals[k] or 0) + v
                 end
+                emitSetsProgress()
             else
                 lastMissing = missing
                 if missing and missing.error == "push_short" then
@@ -366,6 +374,7 @@ function craft_io.run(recipe, opts)
     end
 
     craft_io.drainToward(pullFrom, need, pulled, store, out, recipe)
+    emitSetsProgress()
     if outputsComplete() then
         return finishOk()
     end

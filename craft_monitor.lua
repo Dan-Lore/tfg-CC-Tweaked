@@ -177,12 +177,35 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
         return math.ceil(still / per)
     end
 
+    local function unitsFromDetail(job, detail, fallbackSets)
+        local per = job.outStack.count
+        if detail and detail.outputs and detail.outputs[job.itemId] then
+            return detail.outputs[job.itemId]
+        end
+        local sets = fallbackSets or 0
+        if detail and detail.sets_pushed and detail.sets_pushed > 0 then
+            sets = detail.sets_pushed
+        elseif detail and detail.times and detail.times > 0 then
+            sets = detail.times
+        end
+        if sets < 1 then
+            sets = 1
+        end
+        return per * sets
+    end
+
     local function runOne(job)
         local times = job.times or 1
         emitActivity(opts, activityText(job.recipe, job.itemId, times))
         local ok, detail = machine_lock.runOrStack(job.machine, job.recipeKey, function()
             if job.recipe.flag == "grow" then
-                return deps.runGrow(job.recipe, job.machine, opts)
+                local gOk, gDetail = deps.runGrow(job.recipe, job.machine, opts)
+                if gOk and job.isRoot then
+                    -- Grow finishes in one pulse; bump progress when pull completes.
+                    local gained = unitsFromDetail(job, gDetail, 1)
+                    emitProgress(opts, math.min(rootWant, rootCrafted + gained), rootWant)
+                end
+                return gOk, gDetail
             end
             -- Recompute batch under lock (stock / progress may have changed while queued).
             local runsLeft = runsStillNeeded(job)
@@ -191,6 +214,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 return false, { error = "skipped", skipped = true }
             end
             local batch = batchTimes(job.recipe, ready, runsLeft)
+            emitActivity(opts, activityText(job.recipe, job.itemId, batch))
             return deps.run(job.recipe, {
                 from = opts.from,
                 out = opts.out,
@@ -200,32 +224,35 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 waitTicks = opts.waitTicks,
                 craftWaitTimeout = opts.craftWaitTimeout,
                 times = batch,
+                onSetsProgress = function(setsPushed, _targetSets, pulled)
+                    if not job.isRoot then
+                        return
+                    end
+                    local fromPulled = pulled and pulled[job.itemId]
+                    local gained = fromPulled or (job.outStack.count * (setsPushed or 0))
+                    emitProgress(opts, math.min(rootWant, rootCrafted + gained), rootWant)
+                end,
             })
         end)
 
-        if detail and detail.error == "busy" then
+        if type(detail) == "table" and detail.error == "busy" then
             return true
         end
         if not ok then
-            if detail and detail.skipped then
+            if type(detail) == "table" and detail.skipped then
                 return true
             end
             return false, detail
         end
-        if detail and detail.skipped then
+        if type(detail) == "table" and detail.skipped then
             return true
         end
 
-        local gained = job.outStack.count
-        if detail and detail.sets_pushed and detail.sets_pushed > 0 then
-            gained = job.outStack.count * detail.sets_pushed
-        elseif detail and detail.times then
-            gained = job.outStack.count * detail.times
-        end
+        local gained = unitsFromDetail(job, detail, times)
 
         if job.isRoot then
             rootCrafted = rootCrafted + gained
-            emitProgress(opts, rootCrafted, rootWant)
+            emitProgress(opts, math.min(rootWant, rootCrafted), rootWant)
         end
 
         log[#log + 1] = {
@@ -233,7 +260,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
             machine = job.machine,
             flag = job.recipe.flag,
             detail = detail,
-            times = (detail and detail.sets_pushed) or times,
+            times = (type(detail) == "table" and detail.sets_pushed) or times,
         }
         return true
     end
