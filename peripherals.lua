@@ -49,9 +49,7 @@ local function nameMatchesRecipe(name, recipe)
     return false
 end
 
---- Resolve a physical machine peripheral for a recipe.
--- Prefers exact recipe.machine, then same numeric suffix, then any fuzzy match.
-function peripherals.resolveMachine(recipe)
+local function collectMatches(recipe)
     local names = peripheral.getNames()
     local matches = {}
     local seen = {}
@@ -73,7 +71,13 @@ function peripherals.resolveMachine(recipe)
             matches[#matches + 1] = name
         end
     end
+    return matches
+end
 
+--- Resolve a physical machine peripheral for a recipe.
+-- Priority: exact recipe.machine → matching _circuit suffix → first sorted fuzzy.
+function peripherals.resolveMachine(recipe)
+    local matches = collectMatches(recipe)
     if #matches == 0 then
         return nil
     end

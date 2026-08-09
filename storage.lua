@@ -1,33 +1,8 @@
 -- Parse storage.cfg into named inventories, sources, seeds, routes, settings.
 
+local util = require("util")
+
 local storage = {}
-
-local function trim(s)
-    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local function split(s, sep)
-    local out = {}
-    for part in (s .. sep):gmatch("(.-)" .. sep) do
-        out[#out + 1] = part
-    end
-    return out
-end
-
-local function resolvePath(path)
-    path = path or "storage.cfg"
-    if path:sub(1, 1) == "/" then
-        return path
-    end
-    local base = ""
-    if shell and shell.getRunningProgram then
-        local prog = shell.getRunningProgram()
-        if prog then
-            base = fs.getDir(prog)
-        end
-    end
-    return fs.combine(base, path)
-end
 
 local function emptyConfig()
     return {
@@ -49,14 +24,14 @@ local NAMED_KEYS = {
 }
 
 local function parseLine(cfg, line, lineNo)
-    line = trim(line or "")
+    line = util.trim(line or "")
     if line == "" or line:sub(1, 1) == "#" then
         return
     end
 
-    local parts = split(line, "|")
+    local parts = util.split(line, "|")
     for i = 1, #parts do
-        parts[i] = trim(parts[i])
+        parts[i] = util.trim(parts[i])
     end
 
     local key = parts[1]
@@ -107,7 +82,6 @@ local function parseLine(cfg, line, lineNo)
         return
     end
 
-    -- scalar setting: key | value
     if #parts >= 2 then
         cfg.settings[key] = parts[2]
         return
@@ -128,7 +102,7 @@ end
 
 --- Load storage.cfg. Returns a config table with helper methods.
 function storage.load(path)
-    path = resolvePath(path)
+    path = util.resolvePath(path, "storage.cfg")
     local file = fs.open(path, "r")
     if not file then
         error("Cannot open " .. path, 2)
@@ -183,12 +157,46 @@ function storage.load(path)
         return cfg.named.main
     end
 
+    --- Ordered unique inventories used for both counting and pulling an item.
+    -- Order: explicit source, destFor, main, overflow (flora only if already listed).
+    function cfg.pullSources(itemId, extra)
+        local seen = {}
+        local list = {}
+        local function add(inv)
+            if inv and not seen[inv] and peripheral.isPresent(inv) then
+                seen[inv] = true
+                list[#list + 1] = inv
+            end
+        end
+
+        add(cfg.sources[itemId]) -- explicit source only (not default main yet)
+        add(cfg.destFor(itemId))
+        add(cfg.named.main)
+        add(cfg.named.overflow)
+        if extra then
+            if type(extra) == "string" then
+                add(extra)
+            elseif type(extra) == "table" then
+                for i = 1, #extra do
+                    add(extra[i])
+                end
+            end
+        end
+        -- Fallback: if nothing present, still return default source name for errors.
+        if #list == 0 then
+            local fallback = cfg.sourceOf(itemId)
+            if fallback then
+                list[1] = fallback
+            end
+        end
+        return list
+    end
+
     function cfg.seedDest(index)
         index = tonumber(index) or 0
         return cfg.seedChestPrefix() .. tostring(index)
     end
 
-    --- Output bus for greenhouse index / circuit (e.g. gtceu:mv_output_bus_0).
     function cfg.outputBus(index)
         index = tonumber(index) or 0
         return cfg.outputBusPrefix() .. tostring(index)

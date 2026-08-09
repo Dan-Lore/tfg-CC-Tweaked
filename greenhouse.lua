@@ -9,10 +9,10 @@ local DEFAULT_PULSE = 3 -- seconds; enough to latch one grow cycle
 local function wrapMachine(machineName)
     local machine = peripheral.wrap(machineName)
     if not machine then
-        return nil, "Ошибка: Теплица '" .. tostring(machineName) .. "' не найдена"
+        return nil, "greenhouse not found: " .. tostring(machineName)
     end
     if type(machine.setWorkingEnabled) ~= "function" then
-        return nil, "Ошибка: '" .. tostring(machineName) .. "' не поддерживает setWorkingEnabled"
+        return nil, "no setWorkingEnabled: " .. tostring(machineName)
     end
     return machine
 end
@@ -20,8 +20,7 @@ end
 function Greenhouse.setEnabled(machineName, enabled)
     local machine, err = wrapMachine(machineName)
     if not machine then
-        print(err)
-        return false
+        return false, err
     end
     machine.setWorkingEnabled(enabled and true or false)
     return true
@@ -37,12 +36,11 @@ function Greenhouse.enable(machineName)
 end
 
 --- Brief on-pulse, then force off. Recipe continues to completion on its own.
--- @param pulseSeconds how long to leave working enabled (default 3)
+-- @return ok, err
 function Greenhouse.pulse(machineName, pulseSeconds)
     local machine, err = wrapMachine(machineName)
     if not machine then
-        print(err)
-        return false
+        return false, err
     end
 
     pulseSeconds = tonumber(pulseSeconds) or DEFAULT_PULSE

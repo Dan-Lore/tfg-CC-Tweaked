@@ -8,23 +8,13 @@
 --   outputs  { { name, count, fluid? }, ... }
 --   flag     "grow" | "craft" | "processing"
 
+local util = require("util")
+
 local recipes = {}
-
-local function trim(s)
-    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local function split(s, sep)
-    local out = {}
-    for part in (s .. sep):gmatch("(.-)" .. sep) do
-        out[#out + 1] = part
-    end
-    return out
-end
 
 --- Parse "mod:id 4" or "mod:fluid 100mb" or "#tag:path 1"
 local function parseStack(token)
-    token = trim(token)
+    token = util.trim(token)
     if token == "" or token == "-" or token:lower() == "null" then
         return nil
     end
@@ -51,16 +41,15 @@ local function parseStack(token)
 end
 
 local function parseStackList(field)
-    field = trim(field)
+    field = util.trim(field)
     if field == "" or field == "-" or field:lower() == "null" then
         return {}
     end
 
-    -- Allow optional surrounding parentheses: (a 1, b 2)
     field = field:gsub("^%(", ""):gsub("%)$", "")
 
     local stacks = {}
-    for _, token in ipairs(split(field, ",")) do
+    for _, token in ipairs(util.split(field, ",")) do
         local stack = parseStack(token)
         if stack then
             stacks[#stacks + 1] = stack
@@ -70,7 +59,7 @@ local function parseStackList(field)
 end
 
 local function parseMachine(machine)
-    machine = trim(machine)
+    machine = util.trim(machine)
     local base, circuit = machine:match("^(.-)_(%d+)$")
     if base and circuit then
         return machine, base, tonumber(circuit)
@@ -79,19 +68,19 @@ local function parseMachine(machine)
 end
 
 function recipes.parseLine(line, lineNo)
-    line = trim(line or "")
+    line = util.trim(line or "")
     if line == "" or line:sub(1, 1) == "#" then
         return nil
     end
 
-    local parts = split(line, "|")
+    local parts = util.split(line, "|")
     if #parts < 4 then
         error(("Recipe line %s: expected 4 fields machine|inputs|outputs|flag"):format(tostring(lineNo)))
     end
 
-    local machineRaw = trim(parts[1])
+    local machineRaw = util.trim(parts[1])
     local machine, base, circuit = parseMachine(machineRaw)
-    local flag = trim(parts[4]):lower()
+    local flag = util.trim(parts[4]):lower()
 
     if flag ~= "grow" and flag ~= "craft" and flag ~= "processing" then
         error(("Recipe line %s: unknown flag %q"):format(tostring(lineNo), flag))
@@ -108,23 +97,8 @@ function recipes.parseLine(line, lineNo)
     }
 end
 
-local function resolvePath(path)
-    path = path or "recipes.cfg"
-    if path:sub(1, 1) == "/" then
-        return path
-    end
-    local base = ""
-    if shell and shell.getRunningProgram then
-        local prog = shell.getRunningProgram()
-        if prog then
-            base = fs.getDir(prog)
-        end
-    end
-    return fs.combine(base, path)
-end
-
 function recipes.load(path)
-    path = resolvePath(path)
+    path = util.resolvePath(path, "recipes.cfg")
     local file = fs.open(path, "r")
     if not file then
         error("Cannot open " .. path, 2)
@@ -164,6 +138,29 @@ end
 
 function recipes.byMachine(list, machine)
     return recipes.filter(list, function(r) return r.machine == machine end)
+end
+
+--- Primary non-fluid output stack, or nil.
+function recipes.primaryOutput(recipe)
+    if not recipe or not recipe.outputs then
+        return nil
+    end
+    for i = 1, #recipe.outputs do
+        if not recipe.outputs[i].fluid then
+            return recipe.outputs[i]
+        end
+    end
+    return nil
+end
+
+--- Stable key for machine locking: same recipe identity, different from siblings on same machine.
+function recipes.recipeKey(recipe)
+    if not recipe then
+        return "unknown"
+    end
+    local out = recipes.primaryOutput(recipe)
+    local outName = out and out.name or "-"
+    return tostring(recipe.machine) .. "|" .. outName
 end
 
 return recipes

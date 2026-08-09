@@ -6,42 +6,16 @@ local transfer = require("transfer")
 local recipes = require("recipes")
 local storage = require("storage")
 local peripherals = require("peripherals")
+local util = require("util")
 
 local FLORA_ITEM = "tfg:flora_pellets"
-
-local function short(id)
-    return (id and id:match("([^/]+)$")) or tostring(id)
-end
-
-local function countItem(invName, itemName)
-    local inv = peripheral.wrap(invName)
-    if not inv or not inv.list then
-        return 0
-    end
-    local total = 0
-    for _, item in pairs(inv.list()) do
-        if item.name == itemName then
-            total = total + item.count
-        end
-    end
-    return total
-end
-
-local function moveAll(from, to, itemName)
-    if not from or not to or not peripheral.isPresent(from) or not peripheral.isPresent(to) then
-        return 0
-    end
-    if from == to then
-        return 0
-    end
-    return transfer(from, to, itemName, -1)
-end
 
 --- Seed/plant chest for this item, if it matches any grow recipe seed mapping.
 local function seedDestForItem(store, growRecipes, itemName)
     for i = 1, #growRecipes do
         local recipe = growRecipes[i]
-        local crop = recipe.outputs[1] and recipe.outputs[1].name
+        local primary = recipes.primaryOutput(recipe)
+        local crop = primary and primary.name
         local seedItem = crop and store.seedForCrop(crop)
         if seedItem and seedItem == itemName then
             return store.seedDest(recipe.circuit or 0)
@@ -50,7 +24,7 @@ local function seedDestForItem(store, growRecipes, itemName)
     return nil
 end
 
-local function destForItem(store, growRecipes, recipe, itemName)
+local function destForItem(store, growRecipes, itemName)
     if itemName == FLORA_ITEM then
         return store.flora()
     end
@@ -60,36 +34,27 @@ local function destForItem(store, growRecipes, recipe, itemName)
         return seedDest
     end
 
-    if store.routes[itemName] then
-        return store.destFor(itemName)
-    end
-
-    -- Primary crop of this greenhouse → destFor (usually main)
-    for i = 1, #recipe.outputs do
-        local out = recipe.outputs[i]
-        if not out.fluid and out.name == itemName then
-            return store.destFor(itemName)
-        end
-    end
-
     return store.destFor(itemName)
 end
 
 local function moveWithOverflow(store, from, dest, itemName)
-    local before = countItem(from, itemName)
+    local before = transfer.countItem(from, itemName)
     if before <= 0 then
         return 0
     end
+    if not dest or not peripheral.isPresent(dest) or from == dest then
+        return 0
+    end
 
-    local moved = moveAll(from, dest, itemName)
-    local left = countItem(from, itemName)
+    local moved = transfer(from, dest, itemName, -1)
+    local left = transfer.countItem(from, itemName)
     local overflow = store.overflow()
 
     if left > 0 and overflow and dest ~= overflow and peripheral.isPresent(overflow) then
-        local buffered = moveAll(from, overflow, itemName)
+        local buffered = transfer(from, overflow, itemName, -1)
         if buffered > 0 then
             print(("overflow: %s x%s -> %s (dest full: %s)"):format(
-                short(itemName), tostring(buffered), short(overflow), short(dest)
+                util.short(itemName), tostring(buffered), util.short(overflow), util.short(dest)
             ))
         end
         moved = moved + buffered
@@ -114,17 +79,18 @@ local function drainOverflow(store, growRecipes)
         local name = item.name
         if not seen[name] then
             seen[name] = true
-            -- Use first grow recipe as context for crop dest; seedDestForItem scans all.
-            local recipe = growRecipes[1]
-            local dest = destForItem(store, growRecipes, recipe or { outputs = {} }, name)
             -- Routed items (basil leaves) stay in overflow — that IS their home.
             if store.routes[name] then
-                dest = nil
-            end
-            if dest and dest ~= overflow and peripheral.isPresent(dest) then
-                local n = moveAll(overflow, dest, name)
-                if n > 0 then
-                    print(("drain: %s x%s -> %s"):format(short(name), tostring(n), short(dest)))
+                -- keep
+            else
+                local dest = destForItem(store, growRecipes, name)
+                if dest and dest ~= overflow and peripheral.isPresent(dest) then
+                    local n = transfer(overflow, dest, name, -1)
+                    if n > 0 then
+                        print(("drain: %s x%s -> %s"):format(
+                            util.short(name), tostring(n), util.short(dest)
+                        ))
+                    end
                 end
             end
         end
@@ -135,7 +101,6 @@ local function cleanGreenhouse(store, growRecipes, recipe)
     -- Products leave via GT output bus, not the greenhouse controller inventory.
     local source = store.outputBus(recipe.circuit or 0)
     if not peripheral.isPresent(source) then
-        -- Fallback: greenhouse peripheral itself (older setups)
         source = peripherals.resolveMachine(recipe)
     end
     if not source then
@@ -153,11 +118,11 @@ local function cleanGreenhouse(store, growRecipes, recipe)
         local name = item.name
         if not seen[name] then
             seen[name] = true
-            local dest = destForItem(store, growRecipes, recipe, name)
+            local dest = destForItem(store, growRecipes, name)
             if dest and peripheral.isPresent(dest) then
                 moveWithOverflow(store, source, dest, name)
             elseif dest then
-                print(("missing dest %s for %s"):format(tostring(dest), short(name)))
+                print(("missing dest %s for %s"):format(tostring(dest), util.short(name)))
             end
         end
     end
@@ -170,7 +135,6 @@ local function main()
     local growRecipes = recipes.byFlag(all, "grow")
     local interval = store.getNumber("clean_interval", 2)
 
-    -- Default state: all greenhouses off. Cleaner only moves items from buses.
     greenhouse.disableAll(peripherals.resolveMachine, growRecipes)
 
     print(("greenhouse_clean: %s grow recipes, interval %ss (GH off)"):format(

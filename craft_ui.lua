@@ -3,6 +3,7 @@
 
 local craft = require("craft")
 local storage = require("storage")
+local util = require("util")
 
 local store = storage.load()
 
@@ -32,14 +33,6 @@ local state = {
 }
 
 local buttons = {}
-
-local function short(id)
-    return id:match("([^/]+)$") or id
-end
-
-local function clamp(v, lo, hi)
-    return math.max(lo, math.min(hi, v))
-end
 
 local function fill(x, y, w, h, color)
     mon.setBackgroundColor(color)
@@ -104,7 +97,7 @@ local function formatError(detail)
             return "?"
         end
         name = name:gsub("^#", "")
-        return short(name)
+        return util.short(name)
     end
 
     local function fromMissing(missing)
@@ -153,10 +146,15 @@ local function formatError(detail)
         if err.error == "craft_timeout" then
             return "WAIT " .. prettyName(err.missing and err.missing.name or "?")
         end
+        if err.error == "craft_short" then
+            return "SHORT " .. prettyName(err.missing and err.missing.name or "?")
+        end
         if err.error == "cycle" then
             return "CYCLE " .. prettyName(err.missing and err.missing.name or "?")
         end
-        -- Prefer fluid failures (often the real blocker) over mid-chain items.
+        if err.error == "exception" then
+            return "ERR " .. prettyName(err.missing and err.missing.name or "?")
+        end
         if type(err.missing_all) == "table" then
             for i = 1, #err.missing_all do
                 if err.missing_all[i].fluid then
@@ -197,7 +195,7 @@ local function ensureVisible()
     elseif state.selected > state.scroll + listH then
         state.scroll = state.selected - listH
     end
-    state.scroll = clamp(state.scroll, 0, math.max(0, #state.catalog - listH))
+    state.scroll = util.clamp(state.scroll, 0, math.max(0, #state.catalog - listH))
 end
 
 local function draw()
@@ -260,7 +258,7 @@ local function draw()
             local rowFg = selected and colors.white or colors.lightGray
             fill(1, y, W, 1, rowBg)
             local mark = selected and ">" or " "
-            local label = mark .. short(entry.id)
+            local label = mark .. util.short(entry.id)
             if #label > W then
                 label = label:sub(1, W)
             end
@@ -272,7 +270,6 @@ local function draw()
     end
 
     local y = H - 1
-    -- -10 | -1 | GO | +1 | +10
     local nBtn = 5
     local baseW = math.max(2, math.floor(W / nBtn))
     local specs = {
@@ -315,7 +312,7 @@ local function doCraft()
     end
 
     state.busy = true
-    setStatus("Crafting " .. short(entry.id) .. "...", "busy")
+    setStatus("Crafting " .. util.short(entry.id) .. "...", "busy")
     draw()
 
     local ok, detail = craft.request(entry.id, state.amount, {
@@ -351,25 +348,25 @@ local function onTouch(x, y)
     end
 
     if btn.id == "minus10" then
-        state.amount = clamp(state.amount - 10, 1, CONFIG.maxAmount)
+        state.amount = util.clamp(state.amount - 10, 1, CONFIG.maxAmount)
         draw()
         return
     end
 
     if btn.id == "minus" then
-        state.amount = clamp(state.amount - 1, 1, CONFIG.maxAmount)
+        state.amount = util.clamp(state.amount - 1, 1, CONFIG.maxAmount)
         draw()
         return
     end
 
     if btn.id == "plus" then
-        state.amount = clamp(state.amount + 1, 1, CONFIG.maxAmount)
+        state.amount = util.clamp(state.amount + 1, 1, CONFIG.maxAmount)
         draw()
         return
     end
 
     if btn.id == "plus10" then
-        state.amount = clamp(state.amount + 10, 1, CONFIG.maxAmount)
+        state.amount = util.clamp(state.amount + 10, 1, CONFIG.maxAmount)
         draw()
         return
     end
@@ -390,7 +387,7 @@ local function main()
 
     local mainInv = store.main()
     if mainInv and peripheral.isPresent(mainInv) then
-        state.storageLabel = "Store: " .. short(mainInv)
+        state.storageLabel = "Store: " .. util.short(mainInv)
         setStatus("Ready", "info")
     else
         state.storageLabel = "Store: NONE"
