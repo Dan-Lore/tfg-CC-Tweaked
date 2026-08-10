@@ -1,5 +1,5 @@
--- Public craft API: load/find recipes, run processing, request with monitor stack.
--- Internals: machine_lock, craft_stock, craft_io, craft_grow, craft_monitor.
+-- Public craft API: load/find recipes, run processing, request with realtime monitor.
+-- Internals: craft_plan, craft_monitor, craft_stock, craft_io, craft_grow, machine_lock.
 
 local recipes = require("recipes")
 local peripherals = require("peripherals")

@@ -1,4 +1,5 @@
--- Feed / drain / craft.run for processing recipes (set-by-set + continuous drain).
+-- Feed / drain / craft.run for processing recipes.
+-- Burst-pushes complete sets; short poll only while waiting on the machine.
 
 local transfer = require("transfer")
 local craft_stock = require("craft_stock")
@@ -246,8 +247,11 @@ function craft_io.run(recipe, opts)
     local setsPushed = 0
     local movedTotals = {}
     local lastMissing = nil
-    local stallSleeps = 0
     local pushing = true
+    local stallSince = nil -- os.clock when stock-short stall began
+    local POLL = 0.05
+    local STALL_STOP_PUSH = 6 -- seconds
+    local STALL_FAIL = 10 -- seconds
 
     local function rebuildNeed(sets)
         need, anyItem = craft_io.buildNeedMap(recipe.outputs, sets)
@@ -338,26 +342,39 @@ function craft_io.run(recipe, opts)
             return finishOk()
         end
 
-        if pushing and setsPushed < targetSets and readyForNextSet() then
+        -- Burst: push as many sets as possible without sleeping between successes.
+        while pushing and setsPushed < targetSets and readyForNextSet() and os.clock() < deadline do
             local ok, moved, missing = craft_io.pushOneSet(recipe, opts.machine, store, opts)
             if ok then
                 setsPushed = setsPushed + 1
-                stallSleeps = 0
+                stallSince = nil
                 for k, v in pairs(moved) do
                     movedTotals[k] = (movedTotals[k] or 0) + v
                 end
                 emitSetsProgress()
+                craft_io.drainToward(pullFrom, need, pulled, store, out, recipe)
+                if outputsComplete() then
+                    return finishOk()
+                end
+                -- oneshot: stop burst until this set's outputs are pulled
+                if oneshot then
+                    break
+                end
             else
                 lastMissing = missing
                 if missing and missing.error == "push_short" then
-                    stallSleeps = 0
+                    -- Machine input full: wait briefly for GT to consume.
+                    stallSince = nil
                 else
-                    stallSleeps = stallSleeps + 1
-                    if setsPushed > 0 and stallSleeps > 12 then
+                    if not stallSince then
+                        stallSince = os.clock()
+                    end
+                    local stalledFor = os.clock() - stallSince
+                    if setsPushed > 0 and stalledFor > STALL_STOP_PUSH then
                         pushing = false
                         targetSets = setsPushed
                         rebuildNeed(targetSets)
-                    elseif setsPushed == 0 and stallSleeps > 20 then
+                    elseif setsPushed == 0 and stalledFor > STALL_FAIL then
                         return false, {
                             error = "missing_input",
                             missing = missing,
@@ -367,10 +384,15 @@ function craft_io.run(recipe, opts)
                         }
                     end
                 end
+                break
             end
         end
 
-        sleep(0.5)
+        if outputsComplete() then
+            return finishOk()
+        end
+        -- Brief yield while waiting on GT / oneshot / stock.
+        sleep(POLL)
     end
 
     craft_io.drainToward(pullFrom, need, pulled, store, out, recipe)

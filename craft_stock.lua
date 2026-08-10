@@ -1,4 +1,5 @@
 -- Stock counting and recipe input availability (count == pull sources).
+-- Supports a per-tick snapshot so planners don't re-scan peripherals repeatedly.
 
 local transfer = require("transfer")
 
@@ -58,6 +59,50 @@ function craft_stock.countFluidAvailable(store, fluidOrTag)
     return transfer.countFluid(info.peripheral, info.fluid), info
 end
 
+--- Lazy stock snapshot: counts each item/fluid at most once per tick.
+function craft_stock.snapshot(store, opts)
+    local snap = {
+        store = store,
+        opts = opts,
+        items = {},
+        fluids = {}, -- name -> { have=, info= }
+        _itemDone = {},
+        _fluidDone = {},
+    }
+
+    function snap.item(name)
+        if not name then
+            return 0
+        end
+        if snap._itemDone[name] then
+            return snap.items[name] or 0
+        end
+        snap._itemDone[name] = true
+        local n = craft_stock.countAvailable(store, name, opts)
+        snap.items[name] = n
+        return n
+    end
+
+    function snap.fluid(fluidOrTag)
+        if not fluidOrTag then
+            return 0, nil
+        end
+        if snap._fluidDone[fluidOrTag] then
+            local slot = snap.fluids[fluidOrTag]
+            if not slot then
+                return 0, nil
+            end
+            return slot.have, slot.info
+        end
+        snap._fluidDone[fluidOrTag] = true
+        local have, info = craft_stock.countFluidAvailable(store, fluidOrTag)
+        snap.fluids[fluidOrTag] = { have = have, info = info }
+        return have, info
+    end
+
+    return snap
+end
+
 --- List missing inputs for `times` craft runs (items + fluids). Does not recurse.
 function craft_stock.findMissingInputs(recipe, store, opts, times)
     times = math.max(1, math.floor(tonumber(times) or 1))
@@ -115,7 +160,8 @@ function craft_stock.findMissingInputs(recipe, store, opts, times)
 end
 
 --- How many balanced recipe sets can be fed. Grow (no inputs) is always ready.
-function craft_stock.countCompleteSets(recipe, store, opts)
+-- Optional `snap` uses cached counts.
+function craft_stock.countCompleteSets(recipe, store, opts, snap)
     if not recipe or not recipe.inputs then
         return 0
     end
@@ -131,9 +177,17 @@ function craft_stock.countCompleteSets(recipe, store, opts)
         end
         local have
         if input.fluid then
-            have = craft_stock.countFluidAvailable(store, input.name)
+            if snap then
+                have = snap.fluid(input.name)
+            else
+                have = craft_stock.countFluidAvailable(store, input.name)
+            end
         else
-            have = craft_stock.countAvailable(store, input.name, opts)
+            if snap then
+                have = snap.item(input.name)
+            else
+                have = craft_stock.countAvailable(store, input.name, opts)
+            end
         end
         local can = math.floor(have / per)
         if sets == nil or can < sets then

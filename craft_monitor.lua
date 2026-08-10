@@ -1,13 +1,17 @@
--- Goal stack + resource monitor: craft root amount via crafted counter.
--- Non-oneshot processing: batch max complete sets (min resource); oneshot/grow: 1.
--- Same recipe on a busy machine stacks (queues); different recipe waits elsewhere.
+-- Continuous craft monitor: top-down demand, bottom-up dispatch, realtime replan.
+-- Planner + worker pool run in parallel; no stage waitForAll barrier.
+-- Activity only after a confirmed batch under lock.
 
-local transfer = require("transfer")
 local recipes = require("recipes")
 local craft_stock = require("craft_stock")
+local craft_plan = require("craft_plan")
 local machine_lock = require("machine_lock")
 
 local craft_monitor = {}
+
+local IDLE_SLEEP = 0.05
+local WORKER_COUNT = 6
+local DONE_EVENT = "craft_job_done"
 
 local function emitActivity(opts, text)
     if opts and type(opts.onActivity) == "function" then
@@ -32,137 +36,58 @@ local function activityText(recipe, itemId, times)
     return name .. " x" .. tostring(n)
 end
 
---- How many recipe runs to push now.
--- oneshot / grow → 1; else min(stock complete sets, runs still needed).
-local function batchTimes(recipe, ready, runsWanted)
-    if recipe.flag == "grow" or recipe.oneshot == true then
-        return 1
+local function unitsFromDetail(job, detail, fallbackSets)
+    local per = job.outStack.count
+    if detail and detail.outputs then
+        local n = detail.outputs[job.itemId]
+        if type(n) == "number" and n > 0 then
+            return n
+        end
     end
-    return math.max(1, math.min(ready, runsWanted))
+    local sets = 0
+    if detail and detail.sets_pushed and detail.sets_pushed > 0 then
+        sets = detail.sets_pushed
+    elseif detail and detail.times and detail.times > 0 then
+        sets = detail.times
+    elseif fallbackSets and fallbackSets > 0 then
+        sets = fallbackSets
+    end
+    if sets < 1 then
+        return 0
+    end
+    return per * sets
 end
 
---- deps: findByOutput(list,id), resolveMachine(recipe), run(recipe,opts), runGrow(recipe,machine,opts)
+--- deps: findByOutput, resolveMachine, run, runGrow
 function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
     local store = opts.store
     local rootWant = amount
     local rootCrafted = 0
     local hardSticky = nil
+    local inflight = {} -- itemId -> units reserved
+    local machineBusy = {} -- machine -> recipeKey while job queued/running in pool
+    local index = craft_plan.buildIndex(list, deps.findByOutput)
+
+    local jobQueue = {}
+    local results = {}
+    local shutdown = false
+    local fatalErr = nil
 
     local function rootDone()
         return rootCrafted >= rootWant
     end
 
-    local function gather()
-        local candidates = {}
-        local seenMachine = {}
-        local visiting = {}
-        local hard = nil
+    local function queuePush(job)
+        jobQueue[#jobQueue + 1] = job
+    end
 
-        local function consider(itemId, wantUnits)
-            if wantUnits <= 0 or visiting[itemId] then
-                return
-            end
-            visiting[itemId] = true
-
-            local recipe, outStack = deps.findByOutput(list, itemId)
-            if not recipe or not outStack then
-                visiting[itemId] = nil
-                return
-            end
-
-            local per = outStack.count
-            local isRoot = itemId == rootItemId
-            local have = craft_stock.countAvailable(store, itemId, opts)
-            local stillProduce
-            if isRoot then
-                stillProduce = rootWant - rootCrafted
-            else
-                stillProduce = wantUnits - have
-            end
-            if stillProduce <= 0 then
-                visiting[itemId] = nil
-                return
-            end
-
-            local runsWanted = math.ceil(stillProduce / per)
-
-            for i = 1, #recipe.inputs do
-                local input = recipe.inputs[i]
-                if input.fluid then
-                    local haveF, info = craft_stock.countFluidAvailable(store, input.name)
-                    if (not info or haveF < input.count) and craft_stock.countCompleteSets(recipe, store, opts) < 1 then
-                        hard = {
-                            error = "missing_input",
-                            missing = {
-                                name = input.name,
-                                count = input.count - (haveF or 0),
-                                fluid = true,
-                                error = (not info) and "no_fluid_source" or nil,
-                            },
-                        }
-                    end
-                elseif craft_stock.isCraftableName(input.name) then
-                    local childRecipe = deps.findByOutput(list, input.name)
-                    if childRecipe then
-                        consider(input.name, input.count * runsWanted)
-                    else
-                        local haveI = craft_stock.countAvailable(store, input.name, opts)
-                        if haveI < input.count * runsWanted then
-                            hard = {
-                                error = "missing_input",
-                                missing = {
-                                    name = input.name,
-                                    count = input.count * runsWanted - haveI,
-                                    fluid = false,
-                                },
-                            }
-                        end
-                    end
-                else
-                    local sources = craft_stock.pullSourcesFor(store, input.name, opts)
-                    local haveI = transfer.countFromMany(sources, input.name)
-                    if haveI < input.count * runsWanted then
-                        hard = {
-                            error = "missing_input",
-                            missing = {
-                                name = input.name,
-                                count = input.count * runsWanted - haveI,
-                                fluid = false,
-                                tag = true,
-                            },
-                        }
-                    end
-                end
-            end
-
-            local ready = craft_stock.countCompleteSets(recipe, store, opts)
-            if ready >= 1 then
-                local machine = deps.resolveMachine(recipe)
-                local recipeKey = recipes.recipeKey(recipe)
-                -- Free, or same recipe already on machine (stack/queue).
-                if machine and machine_lock.canStack(machine, recipeKey) and not seenMachine[machine] then
-                    local should = isRoot or (have < wantUnits)
-                    if should then
-                        seenMachine[machine] = true
-                        candidates[#candidates + 1] = {
-                            itemId = itemId,
-                            recipe = recipe,
-                            outStack = outStack,
-                            machine = machine,
-                            recipeKey = recipeKey,
-                            isRoot = isRoot,
-                            runsWanted = runsWanted,
-                            times = batchTimes(recipe, ready, runsWanted),
-                        }
-                    end
-                end
-            end
-
-            visiting[itemId] = nil
+    local function queuePop()
+        if #jobQueue == 0 then
+            return nil
         end
-
-        consider(rootItemId, rootWant - rootCrafted)
-        return candidates, hard
+        local job = jobQueue[1]
+        table.remove(jobQueue, 1)
+        return job
     end
 
     local function runsStillNeeded(job)
@@ -171,49 +96,40 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
             return math.ceil(math.max(0, rootWant - rootCrafted) / per)
         end
         local have = craft_stock.countAvailable(store, job.itemId, opts)
-        -- Cap by what gather asked for this tick (avoid overproducing siblings).
-        local wantUnits = job.runsWanted * per
-        local still = math.max(0, wantUnits - have)
+        local reserved = job.reserved or 0
+        local others = math.max(0, (inflight[job.itemId] or 0) - reserved)
+        local still = math.max(0, (job.runsWanted * per) - have - others)
         return math.ceil(still / per)
     end
 
-    local function unitsFromDetail(job, detail, fallbackSets)
-        local per = job.outStack.count
-        if detail and detail.outputs and detail.outputs[job.itemId] then
-            return detail.outputs[job.itemId]
-        end
-        local sets = fallbackSets or 0
-        if detail and detail.sets_pushed and detail.sets_pushed > 0 then
-            sets = detail.sets_pushed
-        elseif detail and detail.times and detail.times > 0 then
-            sets = detail.times
-        end
-        if sets < 1 then
-            sets = 1
-        end
-        return per * sets
-    end
-
-    local function runOne(job)
-        local times = job.times or 1
-        emitActivity(opts, activityText(job.recipe, job.itemId, times))
+    local function executeJob(job)
         local ok, detail = machine_lock.runOrStack(job.machine, job.recipeKey, function()
             if job.recipe.flag == "grow" then
+                if not job.isRoot then
+                    local have = craft_stock.countAvailable(store, job.itemId, opts)
+                    if have >= (job.deficit or 0) then
+                        return false, { error = "skipped", skipped = true }
+                    end
+                elseif rootCrafted >= rootWant then
+                    return false, { error = "skipped", skipped = true }
+                end
+                emitActivity(opts, activityText(job.recipe, job.itemId, 1))
                 local gOk, gDetail = deps.runGrow(job.recipe, job.machine, opts)
                 if gOk and job.isRoot then
-                    -- Grow finishes in one pulse; bump progress when pull completes.
                     local gained = unitsFromDetail(job, gDetail, 1)
-                    emitProgress(opts, math.min(rootWant, rootCrafted + gained), rootWant)
+                    if gained > 0 then
+                        emitProgress(opts, math.min(rootWant, rootCrafted + gained), rootWant)
+                    end
                 end
                 return gOk, gDetail
             end
-            -- Recompute batch under lock (stock / progress may have changed while queued).
+
             local runsLeft = runsStillNeeded(job)
             local ready = craft_stock.countCompleteSets(job.recipe, store, opts)
             if ready < 1 or runsLeft < 1 then
                 return false, { error = "skipped", skipped = true }
             end
-            local batch = batchTimes(job.recipe, ready, runsLeft)
+            local batch = craft_plan.batchTimes(job.recipe, ready, runsLeft)
             emitActivity(opts, activityText(job.recipe, job.itemId, batch))
             return deps.run(job.recipe, {
                 from = opts.from,
@@ -229,87 +145,183 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                         return
                     end
                     local fromPulled = pulled and pulled[job.itemId]
-                    local gained = fromPulled or (job.outStack.count * (setsPushed or 0))
-                    emitProgress(opts, math.min(rootWant, rootCrafted + gained), rootWant)
+                    local gained = 0
+                    if type(fromPulled) == "number" and fromPulled > 0 then
+                        gained = fromPulled
+                    elseif setsPushed and setsPushed > 0 then
+                        gained = job.outStack.count * setsPushed
+                    end
+                    if gained > 0 then
+                        emitProgress(opts, math.min(rootWant, rootCrafted + gained), rootWant)
+                    end
                 end,
             })
         end)
 
         if type(detail) == "table" and detail.error == "busy" then
-            return true
+            return true, detail, 0
         end
         if not ok then
             if type(detail) == "table" and detail.skipped then
-                return true
+                return true, detail, 0
             end
-            return false, detail
+            return false, detail, 0
         end
         if type(detail) == "table" and detail.skipped then
-            return true
+            return true, detail, 0
         end
 
-        local gained = unitsFromDetail(job, detail, times)
-
-        if job.isRoot then
-            rootCrafted = rootCrafted + gained
-            emitProgress(opts, math.min(rootWant, rootCrafted), rootWant)
-        end
-
-        log[#log + 1] = {
-            item = job.itemId,
-            machine = job.machine,
-            flag = job.recipe.flag,
-            detail = detail,
-            times = (type(detail) == "table" and detail.sets_pushed) or times,
-        }
-        return true
+        return true, detail, unitsFromDetail(job, detail, job.times)
     end
 
-    emitProgress(opts, 0, rootWant)
-    emitActivity(opts, "planning...")
+    local function applyResult(res)
+        local job = res.job
+        local reserved = job.reserved or 0
+        inflight[job.itemId] = math.max(0, (inflight[job.itemId] or 0) - reserved)
+        machineBusy[job.machine] = nil
 
-    while not rootDone() do
-        local candidates, hard = gather()
-        if hard then
-            hardSticky = hard
+        if not res.ok then
+            if not (type(res.detail) == "table" and (res.detail.skipped or res.detail.error == "busy")) then
+                fatalErr = fatalErr or res.detail
+            end
+            return
         end
 
-        if #candidates == 0 then
-            if hardSticky and not machine_lock.busyAny() then
-                return false, hardSticky
+        if res.gained and res.gained > 0 then
+            if job.isRoot then
+                rootCrafted = rootCrafted + res.gained
+                emitProgress(opts, math.min(rootWant, rootCrafted), rootWant)
             end
-            emitActivity(opts, "waiting...")
-            sleep(0.35)
-        else
-            hardSticky = nil
-            if #candidates == 1 then
-                local ok, err = runOne(candidates[1])
-                if not ok then
-                    return false, err
-                end
+            log[#log + 1] = {
+                item = job.itemId,
+                machine = job.machine,
+                flag = job.recipe.flag,
+                detail = res.detail,
+                times = (type(res.detail) == "table" and res.detail.sets_pushed) or job.times,
+            }
+        end
+    end
+
+    local function drainResults()
+        while #results > 0 do
+            local res = results[1]
+            table.remove(results, 1)
+            applyResult(res)
+        end
+    end
+
+    local function workerLoop()
+        while not shutdown do
+            local job = queuePop()
+            if job then
+                local ok, detail, gained = executeJob(job)
+                results[#results + 1] = {
+                    job = job,
+                    ok = ok,
+                    detail = detail,
+                    gained = gained or 0,
+                }
+                os.queueEvent(DONE_EVENT)
             else
-                local firstErr = nil
-                local funcs = {}
-                for i = 1, #candidates do
-                    local job = candidates[i]
-                    funcs[i] = function()
-                        if firstErr then
-                            return
-                        end
-                        local ok, err = runOne(job)
-                        if not ok and not firstErr then
-                            firstErr = err
-                        end
+                sleep(IDLE_SLEEP)
+            end
+        end
+    end
+
+    local function plannerLoop()
+        emitProgress(opts, 0, rootWant)
+        emitActivity(opts, "planning...")
+
+        while not rootDone() and not fatalErr do
+            drainResults()
+            if rootDone() or fatalErr then
+                break
+            end
+
+            local snap = craft_stock.snapshot(store, opts)
+            local _need, deficit, hard = craft_plan.computeDemand(
+                index,
+                rootItemId,
+                rootWant - rootCrafted,
+                snap,
+                inflight
+            )
+            if hard then
+                hardSticky = hard
+            end
+
+            local jobs = craft_plan.readyJobs(
+                index,
+                deficit,
+                snap,
+                deps.resolveMachine,
+                machineBusy,
+                rootItemId
+            )
+
+            local dispatched = 0
+            for i = 1, #jobs do
+                local job = jobs[i]
+                if not machineBusy[job.machine] and not machine_lock.isBusy(job.machine) then
+                    local reserved = job.times * job.outStack.count
+                    job.reserved = reserved
+                    inflight[job.itemId] = (inflight[job.itemId] or 0) + reserved
+                    machineBusy[job.machine] = job.recipeKey
+                    hardSticky = nil
+                    queuePush(job)
+                    dispatched = dispatched + 1
+                end
+            end
+
+            local busy = next(machineBusy) ~= nil or #jobQueue > 0 or machine_lock.busyAny()
+            if dispatched == 0 and not busy then
+                if hardSticky then
+                    fatalErr = hardSticky
+                    break
+                end
+                emitActivity(opts, "waiting...")
+                sleep(IDLE_SLEEP)
+            else
+                -- Wake on job completion or short tick to replan free machines.
+                local timer = os.startTimer(IDLE_SLEEP)
+                while true do
+                    local ev, p1 = os.pullEvent()
+                    if ev == DONE_EVENT then
+                        break
+                    elseif ev == "timer" and p1 == timer then
+                        break
                     end
                 end
-                parallel.waitForAll(table.unpack(funcs))
-                if firstErr then
-                    return false, firstErr
+            end
+        end
+
+        -- Wait for in-flight jobs to finish.
+        while next(machineBusy) ~= nil or #jobQueue > 0 do
+            drainResults()
+            if next(machineBusy) == nil and #jobQueue == 0 then
+                break
+            end
+            local timer = os.startTimer(IDLE_SLEEP)
+            while true do
+                local ev, p1 = os.pullEvent()
+                if ev == DONE_EVENT or (ev == "timer" and p1 == timer) then
+                    break
                 end
             end
         end
+        drainResults()
+        shutdown = true
     end
 
+    local funcs = { plannerLoop }
+    for _ = 1, WORKER_COUNT do
+        funcs[#funcs + 1] = workerLoop
+    end
+    parallel.waitForAll(table.unpack(funcs))
+
+    if fatalErr then
+        return false, fatalErr
+    end
     return true, rootCrafted
 end
 

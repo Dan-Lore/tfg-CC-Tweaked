@@ -4,6 +4,7 @@
 local machine_lock = {}
 
 local locks = {} -- name -> { key = recipeKey }
+local LOCK_POLL = 0.05
 
 function machine_lock.isBusy(machine)
     return machine ~= nil and locks[machine] ~= nil
@@ -41,7 +42,7 @@ function machine_lock.withLock(machine, recipeKey, fn)
             locks[machine] = { key = recipeKey }
             break
         end
-        sleep(0.25)
+        sleep(LOCK_POLL)
     end
 
     local ok, a, b = pcall(fn)
