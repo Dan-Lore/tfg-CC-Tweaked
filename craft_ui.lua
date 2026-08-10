@@ -363,25 +363,30 @@ local function doCraft()
     setStatus("Crafting " .. util.short(entry.id), "busy")
     draw()
 
-    local ok, detail = craft.request(entry.id, state.amount, {
-        store = store,
-        craftWaitTimeout = CONFIG.craftWaitTimeout,
-        growPulse = CONFIG.growPulse,
-        growWaitTimeout = CONFIG.growWaitTimeout,
-        onActivity = function(text)
-            state.activity = tostring(text or "")
-            draw()
-        end,
-        onProgress = function(done, total)
-            state.progressDone = tonumber(done) or 0
-            state.progressTotal = tonumber(total) or state.amount
-            draw()
-        end,
-    })
+    local ok, detail
+    local ran, err = pcall(function()
+        ok, detail = craft.request(entry.id, state.amount, {
+            store = store,
+            craftWaitTimeout = CONFIG.craftWaitTimeout,
+            growPulse = CONFIG.growPulse,
+            growWaitTimeout = CONFIG.growWaitTimeout,
+            onActivity = function(text)
+                state.activity = tostring(text or "")
+                draw()
+            end,
+            onProgress = function(done, total)
+                state.progressDone = tonumber(done) or 0
+                state.progressTotal = tonumber(total) or state.amount
+                draw()
+            end,
+        })
+    end)
 
     state.busy = false
     state.activity = ""
-    if ok then
+    if not ran then
+        setStatus("ERR " .. tostring(err), "error")
+    elseif ok then
         setStatus("OK +" .. tostring(detail.produced), "ok")
     else
         setStatus(formatError(detail), "error")

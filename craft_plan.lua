@@ -108,6 +108,10 @@ function craft_plan.computeDemand(index, rootItemId, rootStill, snap, inflight)
         local recipe = entry.recipe
         local outStack = entry.outStack
         local per = outStack.count
+        if not per or per <= 0 then
+            visiting[itemId] = nil
+            return
+        end
         local isRoot = itemId == rootItemId
         local have = snap.item(itemId)
         local inFlight = (inflight and inflight[itemId]) or 0

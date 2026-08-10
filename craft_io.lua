@@ -356,7 +356,8 @@ function craft_io.run(recipe, opts)
                 if outputsComplete() then
                     return finishOk()
                 end
-                -- oneshot: stop burst until this set's outputs are pulled
+                -- Yield so CC never hits "too long without yielding" on large batches.
+                sleep(0)
                 if oneshot then
                     break
                 end

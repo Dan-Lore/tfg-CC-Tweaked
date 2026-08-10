@@ -1,6 +1,6 @@
--- Continuous craft monitor: top-down demand, bottom-up dispatch, realtime replan.
--- Planner + worker pool run in parallel; no stage waitForAll barrier.
--- Activity only after a confirmed batch under lock.
+-- Continuous craft monitor: top-down demand, bottom-up dispatch.
+-- Each tick: snapshot → plan → run ready jobs on free machines → replan immediately.
+-- Activity only after a confirmed batch under lock. All job errors are caught.
 
 local recipes = require("recipes")
 local craft_stock = require("craft_stock")
@@ -10,8 +10,6 @@ local machine_lock = require("machine_lock")
 local craft_monitor = {}
 
 local IDLE_SLEEP = 0.05
-local WORKER_COUNT = 6
-local DONE_EVENT = "craft_job_done"
 
 local function emitActivity(opts, text)
     if opts and type(opts.onActivity) == "function" then
@@ -64,34 +62,18 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
     local rootWant = amount
     local rootCrafted = 0
     local hardSticky = nil
-    local inflight = {} -- itemId -> units reserved
-    local machineBusy = {} -- machine -> recipeKey while job queued/running in pool
+    local inflight = {}
     local index = craft_plan.buildIndex(list, deps.findByOutput)
-
-    local jobQueue = {}
-    local results = {}
-    local shutdown = false
-    local fatalErr = nil
 
     local function rootDone()
         return rootCrafted >= rootWant
     end
 
-    local function queuePush(job)
-        jobQueue[#jobQueue + 1] = job
-    end
-
-    local function queuePop()
-        if #jobQueue == 0 then
-            return nil
-        end
-        local job = jobQueue[1]
-        table.remove(jobQueue, 1)
-        return job
-    end
-
     local function runsStillNeeded(job)
         local per = job.outStack.count
+        if per <= 0 then
+            return 0
+        end
         if job.isRoot then
             return math.ceil(math.max(0, rootWant - rootCrafted) / per)
         end
@@ -114,14 +96,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                     return false, { error = "skipped", skipped = true }
                 end
                 emitActivity(opts, activityText(job.recipe, job.itemId, 1))
-                local gOk, gDetail = deps.runGrow(job.recipe, job.machine, opts)
-                if gOk and job.isRoot then
-                    local gained = unitsFromDetail(job, gDetail, 1)
-                    if gained > 0 then
-                        emitProgress(opts, math.min(rootWant, rootCrafted + gained), rootWant)
-                    end
-                end
-                return gOk, gDetail
+                return deps.runGrow(job.recipe, job.machine, opts)
             end
 
             local runsLeft = runsStillNeeded(job)
@@ -158,170 +133,159 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
             })
         end)
 
-        if type(detail) == "table" and detail.error == "busy" then
+        if type(detail) == "table" and (detail.error == "busy" or detail.skipped) then
             return true, detail, 0
         end
         if not ok then
-            if type(detail) == "table" and detail.skipped then
-                return true, detail, 0
-            end
             return false, detail, 0
         end
-        if type(detail) == "table" and detail.skipped then
-            return true, detail, 0
-        end
-
         return true, detail, unitsFromDetail(job, detail, job.times)
     end
 
-    local function applyResult(res)
-        local job = res.job
+    local function applyResult(job, ok, detail, gained)
         local reserved = job.reserved or 0
         inflight[job.itemId] = math.max(0, (inflight[job.itemId] or 0) - reserved)
-        machineBusy[job.machine] = nil
 
-        if not res.ok then
-            if not (type(res.detail) == "table" and (res.detail.skipped or res.detail.error == "busy")) then
-                fatalErr = fatalErr or res.detail
+        if not ok then
+            if type(detail) == "table" and (detail.skipped or detail.error == "busy") then
+                return nil
             end
-            return
+            return detail or { error = "craft_failed" }
         end
 
-        if res.gained and res.gained > 0 then
+        if gained and gained > 0 then
             if job.isRoot then
-                rootCrafted = rootCrafted + res.gained
+                rootCrafted = rootCrafted + gained
                 emitProgress(opts, math.min(rootWant, rootCrafted), rootWant)
             end
             log[#log + 1] = {
                 item = job.itemId,
                 machine = job.machine,
                 flag = job.recipe.flag,
-                detail = res.detail,
-                times = (type(res.detail) == "table" and res.detail.sets_pushed) or job.times,
+                detail = detail,
+                times = (type(detail) == "table" and detail.sets_pushed) or job.times,
             }
         end
+        return nil
     end
 
-    local function drainResults()
-        while #results > 0 do
-            local res = results[1]
-            table.remove(results, 1)
-            applyResult(res)
+    --- Run one job; catch all errors so parallel never kills the request silently.
+    local function safeRun(job, slot)
+        local ran, ok, detail, gained = pcall(function()
+            return executeJob(job)
+        end)
+        if not ran then
+            slot.ok = false
+            slot.detail = {
+                error = "exception",
+                missing = { name = tostring(ok), count = 1 },
+            }
+            slot.gained = 0
+            return
         end
+        slot.ok = ok
+        slot.detail = detail
+        slot.gained = gained or 0
     end
 
-    local function workerLoop()
-        while not shutdown do
-            local job = queuePop()
-            if job then
-                local ok, detail, gained = executeJob(job)
-                results[#results + 1] = {
-                    job = job,
-                    ok = ok,
-                    detail = detail,
-                    gained = gained or 0,
+    emitProgress(opts, 0, rootWant)
+    emitActivity(opts, "planning...")
+
+    while not rootDone() do
+        sleep(0) -- always yield between plan ticks (avoid "too long without yielding")
+
+        local snap = craft_stock.snapshot(store, opts)
+        local _need, deficit, hard = craft_plan.computeDemand(
+            index,
+            rootItemId,
+            rootWant - rootCrafted,
+            snap,
+            inflight
+        )
+        if hard then
+            hardSticky = hard
+        end
+
+        local jobs = craft_plan.readyJobs(
+            index,
+            deficit,
+            snap,
+            deps.resolveMachine,
+            nil,
+            rootItemId
+        )
+
+        -- Only free machines; bottom-up order already applied.
+        local wave = {}
+        local claimed = {}
+        for i = 1, #jobs do
+            local job = jobs[i]
+            if job.machine and not claimed[job.machine] and not machine_lock.isBusy(job.machine) then
+                claimed[job.machine] = true
+                local reserved = job.times * job.outStack.count
+                job.reserved = reserved
+                inflight[job.itemId] = (inflight[job.itemId] or 0) + reserved
+                wave[#wave + 1] = job
+                hardSticky = nil
+            end
+        end
+
+        if #wave == 0 then
+            if hardSticky and not machine_lock.busyAny() then
+                return false, hardSticky
+            end
+            emitActivity(opts, "waiting...")
+            sleep(IDLE_SLEEP)
+        else
+            local slots = {}
+            local fns = {}
+            for i = 1, #wave do
+                local job = wave[i]
+                local slot = { job = job, ok = true, detail = nil, gained = 0 }
+                slots[i] = slot
+                fns[i] = function()
+                    safeRun(job, slot)
+                end
+            end
+
+            local parOk, parErr = pcall(function()
+                if #fns == 1 then
+                    fns[1]()
+                else
+                    parallel.waitForAll(table.unpack(fns))
+                end
+            end)
+            if not parOk then
+                -- Release inflight for the whole wave on catastrophic parallel failure.
+                for i = 1, #wave do
+                    local job = wave[i]
+                    local reserved = job.reserved or 0
+                    inflight[job.itemId] = math.max(0, (inflight[job.itemId] or 0) - reserved)
+                end
+                return false, {
+                    error = "exception",
+                    missing = { name = tostring(parErr), count = 1 },
                 }
-                os.queueEvent(DONE_EVENT)
-            else
-                sleep(IDLE_SLEEP)
+            end
+
+            local firstErr = nil
+            for i = 1, #slots do
+                local slot = slots[i]
+                local err = applyResult(slot.job, slot.ok, slot.detail, slot.gained)
+                if err and not firstErr then
+                    firstErr = err
+                end
+            end
+            if firstErr then
+                return false, firstErr
+            end
+
+            if not rootDone() then
+                emitActivity(opts, "planning...")
             end
         end
     end
 
-    local function plannerLoop()
-        emitProgress(opts, 0, rootWant)
-        emitActivity(opts, "planning...")
-
-        while not rootDone() and not fatalErr do
-            drainResults()
-            if rootDone() or fatalErr then
-                break
-            end
-
-            local snap = craft_stock.snapshot(store, opts)
-            local _need, deficit, hard = craft_plan.computeDemand(
-                index,
-                rootItemId,
-                rootWant - rootCrafted,
-                snap,
-                inflight
-            )
-            if hard then
-                hardSticky = hard
-            end
-
-            local jobs = craft_plan.readyJobs(
-                index,
-                deficit,
-                snap,
-                deps.resolveMachine,
-                machineBusy,
-                rootItemId
-            )
-
-            local dispatched = 0
-            for i = 1, #jobs do
-                local job = jobs[i]
-                if not machineBusy[job.machine] and not machine_lock.isBusy(job.machine) then
-                    local reserved = job.times * job.outStack.count
-                    job.reserved = reserved
-                    inflight[job.itemId] = (inflight[job.itemId] or 0) + reserved
-                    machineBusy[job.machine] = job.recipeKey
-                    hardSticky = nil
-                    queuePush(job)
-                    dispatched = dispatched + 1
-                end
-            end
-
-            local busy = next(machineBusy) ~= nil or #jobQueue > 0 or machine_lock.busyAny()
-            if dispatched == 0 and not busy then
-                if hardSticky then
-                    fatalErr = hardSticky
-                    break
-                end
-                emitActivity(opts, "waiting...")
-                sleep(IDLE_SLEEP)
-            else
-                -- Wake on job completion or short tick to replan free machines.
-                local timer = os.startTimer(IDLE_SLEEP)
-                while true do
-                    local ev, p1 = os.pullEvent()
-                    if ev == DONE_EVENT then
-                        break
-                    elseif ev == "timer" and p1 == timer then
-                        break
-                    end
-                end
-            end
-        end
-
-        -- Wait for in-flight jobs to finish.
-        while next(machineBusy) ~= nil or #jobQueue > 0 do
-            drainResults()
-            if next(machineBusy) == nil and #jobQueue == 0 then
-                break
-            end
-            local timer = os.startTimer(IDLE_SLEEP)
-            while true do
-                local ev, p1 = os.pullEvent()
-                if ev == DONE_EVENT or (ev == "timer" and p1 == timer) then
-                    break
-                end
-            end
-        end
-        drainResults()
-        shutdown = true
-    end
-
-    local funcs = { plannerLoop }
-    for _ = 1, WORKER_COUNT do
-        funcs[#funcs + 1] = workerLoop
-    end
-    parallel.waitForAll(table.unpack(funcs))
-
-    if fatalErr then
-        return false, fatalErr
-    end
     return true, rootCrafted
 end
 
