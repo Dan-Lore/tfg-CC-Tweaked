@@ -270,20 +270,27 @@ function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMach
                             and machine_lock.canStack(machine, recipeKey)
                             and (not reserved or reserved == recipeKey)
                         if okMachine then
-                            local runsWanted = math.ceil(still / per)
-                            local times = batchTimes(recipe, ready, runsWanted)
-                            candidates[#candidates + 1] = {
-                                itemId = itemId,
-                                recipe = recipe,
-                                outStack = outStack,
-                                machine = machine,
-                                recipeKey = recipeKey,
-                                isRoot = itemId == rootItemId,
-                                runsWanted = runsWanted,
-                                times = times,
-                                depth = index.depth[itemId] or 0,
-                                deficit = still,
-                            }
+                        local runsWanted = math.ceil(still / per)
+                        local times = batchTimes(recipe, ready, runsWanted)
+                        local have = snap.item(itemId)
+                        -- Absolute want for intermediates (deficit already subtracted have once).
+                        local wantUnits = still
+                        if itemId ~= rootItemId then
+                            wantUnits = still + have
+                        end
+                        candidates[#candidates + 1] = {
+                            itemId = itemId,
+                            recipe = recipe,
+                            outStack = outStack,
+                            machine = machine,
+                            recipeKey = recipeKey,
+                            isRoot = itemId == rootItemId,
+                            runsWanted = runsWanted,
+                            times = times,
+                            depth = index.depth[itemId] or 0,
+                            deficit = still,
+                            wantUnits = wantUnits,
+                        }
                         end
                     end
                 end

@@ -64,15 +64,14 @@ end
 
 function craft_log.write(msg)
     msg = tostring(msg or "")
-    -- Strip newlines for one-line log rows.
     msg = msg:gsub("[\r\n]", " ")
     state.lines[#state.lines + 1] = msg
     while #state.lines > state.maxLines do
         table.remove(state.lines, 1)
     end
+    -- Terminal always; monitor redraw is best-effort and must not throw.
     print("[craft] " .. msg)
-    redraw()
-    -- Yield so the log monitor paints and CC budget resets.
+    pcall(redraw)
     sleep(0)
 end
 
