@@ -260,10 +260,11 @@ function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMach
                 local outStack = entry.outStack
                 local per = outStack.count
                 if per and per > 0 then
-                    local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
-                    if ready >= 1 then
-                        local machine = resolveMachine(recipe)
-                        local recipeKey = recipes.recipeKey(recipe)
+                local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
+                if ready >= 1 then
+                    local machine = resolveMachine(recipe)
+                    sleep(0)
+                    local recipeKey = recipes.recipeKey(recipe)
                         local reserved = reservedMachines and reservedMachines[machine]
                         local okMachine = machine
                             and machine_lock.canStack(machine, recipeKey)

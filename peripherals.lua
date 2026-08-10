@@ -1,4 +1,5 @@
 -- Resolve GT / TFG machine peripherals from recipe machine ids.
+-- Yields while scanning; supports a per-request cache table.
 
 local peripherals = {}
 
@@ -70,35 +71,59 @@ local function collectMatches(recipe)
             seen[name] = true
             matches[#matches + 1] = name
         end
+        -- Yield every few peripherals — large TFG networks otherwise kill the computer.
+        if i % 8 == 0 then
+            sleep(0)
+        end
     end
     return matches
 end
 
 --- Resolve a physical machine peripheral for a recipe.
--- Priority: exact recipe.machine → matching _circuit suffix → first sorted fuzzy.
-function peripherals.resolveMachine(recipe)
-    local matches = collectMatches(recipe)
-    if #matches == 0 then
+-- Optional cache table: cache[recipe.machine] = name|false
+function peripherals.resolveMachine(recipe, cache)
+    if not recipe then
         return nil
     end
-
-    for i = 1, #matches do
-        if matches[i] == recipe.machine then
-            return matches[i]
+    local key = recipe.machine or "?"
+    if cache then
+        local hit = cache[key]
+        if hit ~= nil then
+            if hit == false then
+                return nil
+            end
+            return hit
         end
     end
 
-    if recipe.circuit ~= nil then
-        local suffix = "_" .. tostring(recipe.circuit)
+    local matches = collectMatches(recipe)
+    local found = nil
+    if #matches > 0 then
         for i = 1, #matches do
-            if matches[i]:sub(-#suffix) == suffix then
-                return matches[i]
+            if matches[i] == recipe.machine then
+                found = matches[i]
+                break
             end
         end
+        if not found and recipe.circuit ~= nil then
+            local suffix = "_" .. tostring(recipe.circuit)
+            for i = 1, #matches do
+                if matches[i]:sub(-#suffix) == suffix then
+                    found = matches[i]
+                    break
+                end
+            end
+        end
+        if not found then
+            table.sort(matches)
+            found = matches[1]
+        end
     end
 
-    table.sort(matches)
-    return matches[1]
+    if cache then
+        cache[key] = found or false
+    end
+    return found
 end
 
 return peripherals

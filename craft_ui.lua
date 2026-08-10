@@ -4,17 +4,22 @@
 local craft = require("craft")
 local storage = require("storage")
 local util = require("util")
+local craft_log = require("craft_log")
 
 local store = storage.load()
 
 local CONFIG = {
     monitor = store.get("monitor", "right"),
+    logMonitor = store.get("log_monitor", "left"),
     textScale = store.getNumber("text_scale", 0.5),
+    logTextScale = store.getNumber("log_text_scale", 0.5),
     craftWaitTimeout = store.getNumber("craft_wait_timeout", 300),
     growPulse = store.getNumber("grow_pulse", 3),
     growWaitTimeout = store.getNumber("grow_wait_timeout", 600),
     maxAmount = store.getNumber("max_amount", 100),
 }
+
+craft_log.open(CONFIG.logMonitor, CONFIG.logTextScale)
 
 local mon = assert(peripheral.wrap(CONFIG.monitor), "No monitor on " .. CONFIG.monitor)
 mon.setTextScale(CONFIG.textScale)
@@ -386,12 +391,14 @@ local function doCraft()
     state.activity = ""
     if not ran then
         print("craft error: " .. tostring(err))
+        pcall(craft_log.write, "DIE " .. tostring(err))
         setStatus("ERR " .. tostring(err):sub(1, math.max(1, W - 4)), "error")
     elseif ok then
         setStatus("OK +" .. tostring(detail.produced), "ok")
     else
         local msg = formatError(detail)
         print("craft fail: " .. tostring(msg))
+        pcall(craft_log.write, "FAIL " .. tostring(msg))
         setStatus(msg, "error")
     end
     draw()

@@ -1,10 +1,11 @@
 -- Continuous craft monitor: top-down demand, bottom-up dispatch.
--- Planning uses a one-scan inventory snapshot with yields (no silent host kill).
+-- Planning uses inventory snapshot + cached machine resolve; steps logged via craft_log.
 
 local recipes = require("recipes")
 local craft_stock = require("craft_stock")
 local craft_plan = require("craft_plan")
 local machine_lock = require("machine_lock")
+local craft_log = require("craft_log")
 
 local craft_monitor = {}
 
@@ -20,6 +21,10 @@ local function emitProgress(opts, done, total)
     if opts and type(opts.onProgress) == "function" then
         pcall(opts.onProgress, done, total)
     end
+end
+
+local function log(msg)
+    pcall(craft_log.write, msg)
 end
 
 local function activityText(recipe, itemId, times)
@@ -55,8 +60,10 @@ local function unitsFromDetail(job, detail, fallbackSets)
     return per * sets
 end
 
-local function planTick(deps, index, store, opts, rootItemId, rootStill, inflight, preloadItems, preloadFluids)
+local function planTick(deps, index, store, opts, rootItemId, rootStill, inflight, preloadItems, preloadFluids, machineCache)
+    log("plan snap")
     local snap = craft_stock.snapshot(store, opts, preloadItems, preloadFluids)
+    log("plan demand")
     local _need, deficit, hard = craft_plan.computeDemand(
         index,
         rootItemId,
@@ -64,14 +71,24 @@ local function planTick(deps, index, store, opts, rootItemId, rootStill, infligh
         snap,
         inflight
     )
+    local nDef = 0
+    for _ in pairs(deficit) do
+        nDef = nDef + 1
+    end
+    log("deficits " .. tostring(nDef))
+    log("plan jobs")
+    local resolve = function(recipe)
+        return deps.resolveMachine(recipe, machineCache)
+    end
     local jobs = craft_plan.readyJobs(
         index,
         deficit,
         snap,
-        deps.resolveMachine,
+        resolve,
         nil,
         rootItemId
     )
+    log("jobs " .. tostring(#jobs))
     return {
         deficit = deficit,
         hard = hard,
@@ -80,14 +97,26 @@ local function planTick(deps, index, store, opts, rootItemId, rootStill, infligh
 end
 
 --- deps: findByOutput, resolveMachine, run, runGrow
-function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
+function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
     local store = opts.store
     local rootWant = amount
     local rootCrafted = 0
     local hardSticky = nil
     local inflight = {}
+    local machineCache = {}
+
+    log("index build")
     local index = craft_plan.buildIndex(list, deps.findByOutput)
+    log("collect names")
     local preloadItems, preloadFluids = craft_plan.collectNames(index, rootItemId)
+    log("items " .. tostring(#preloadItems) .. " fluids " .. tostring(#preloadFluids))
+
+    log("cache machines")
+    for _, entry in pairs(index.byOutput) do
+        deps.resolveMachine(entry.recipe, machineCache)
+        sleep(0)
+    end
+    log("machines ok")
 
     local function rootDone()
         return rootCrafted >= rootWant
@@ -120,6 +149,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                     return false, { error = "skipped", skipped = true }
                 end
                 emitActivity(opts, activityText(job.recipe, job.itemId, 1))
+                log("grow " .. (job.itemId:match("([^/]+)$") or job.itemId))
                 return deps.runGrow(job.recipe, job.machine, opts)
             end
 
@@ -129,7 +159,9 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 return false, { error = "skipped", skipped = true }
             end
             local batch = craft_plan.batchTimes(job.recipe, ready, runsLeft)
-            emitActivity(opts, activityText(job.recipe, job.itemId, batch))
+            local label = activityText(job.recipe, job.itemId, batch)
+            emitActivity(opts, label)
+            log("run " .. label)
             return deps.run(job.recipe, {
                 from = opts.from,
                 out = opts.out,
@@ -178,11 +210,12 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
         end
 
         if gained and gained > 0 then
+            log("ok +" .. tostring(gained) .. " " .. (job.itemId:match("([^/]+)$") or ""))
             if job.isRoot then
                 rootCrafted = rootCrafted + gained
                 emitProgress(opts, math.min(rootWant, rootCrafted), rootWant)
             end
-            log[#log + 1] = {
+            logSteps[#logSteps + 1] = {
                 item = job.itemId,
                 machine = job.machine,
                 flag = job.recipe.flag,
@@ -204,6 +237,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 missing = { name = tostring(ok), count = 1 },
             }
             slot.gained = 0
+            log("ERR " .. tostring(ok))
             return
         end
         slot.ok = ok
@@ -213,15 +247,17 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
 
     emitProgress(opts, 0, rootWant)
     emitActivity(opts, "planning...")
+    log("request " .. (rootItemId:match("([^/]+)$") or rootItemId) .. " x" .. tostring(rootWant))
 
     while not rootDone() do
         sleep(0)
 
         local tickOk, tick = pcall(planTick,
             deps, index, store, opts, rootItemId, rootWant - rootCrafted,
-            inflight, preloadItems, preloadFluids
+            inflight, preloadItems, preloadFluids, machineCache
         )
         if not tickOk then
+            log("PLAN FAIL " .. tostring(tick))
             return false, {
                 error = "exception",
                 missing = { name = "planning: " .. tostring(tick), count = 1 },
@@ -232,6 +268,8 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
         local jobs = tick.jobs
         if hard then
             hardSticky = hard
+            local m = hard.missing and hard.missing.name
+            log("hard " .. tostring(m and (m:match("([^/]+)$") or m)))
         end
 
         local wave = {}
@@ -247,12 +285,15 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 hardSticky = nil
             end
         end
+        log("wave " .. tostring(#wave))
 
         if #wave == 0 then
             if hardSticky and not machine_lock.busyAny() then
+                log("fail hard miss")
                 return false, hardSticky
             end
             emitActivity(opts, "waiting...")
+            log("wait")
             sleep(IDLE_SLEEP)
         else
             local slots = {}
@@ -279,6 +320,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                     local reserved = job.reserved or 0
                     inflight[job.itemId] = math.max(0, (inflight[job.itemId] or 0) - reserved)
                 end
+                log("PAR FAIL " .. tostring(parErr))
                 return false, {
                     error = "exception",
                     missing = { name = tostring(parErr), count = 1 },
@@ -294,6 +336,8 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 end
             end
             if firstErr then
+                local m = firstErr.missing and firstErr.missing.name or firstErr.error
+                log("fail " .. tostring(m))
                 return false, firstErr
             end
 
@@ -303,6 +347,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
         end
     end
 
+    log("done " .. tostring(rootCrafted))
     return true, rootCrafted
 end
 
