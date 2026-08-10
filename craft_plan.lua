@@ -1,4 +1,4 @@
--- Recipe index, depth, top-down demand, bottom-up ready jobs (one stock snapshot per tick).
+-- Recipe index, depth, top-down demand, bottom-up ready jobs.
 
 local recipes = require("recipes")
 local craft_stock = require("craft_stock")
@@ -13,7 +13,7 @@ local function batchTimes(recipe, ready, runsWanted)
     return math.max(1, math.min(ready, runsWanted))
 end
 
---- Build once per craft.request: recipeByOutput, depth, children.
+--- Build once per craft.request: recipeByOutput, depth.
 function craft_plan.buildIndex(list, findByOutput)
     local byOutput = {}
     for i = 1, #list do
@@ -29,7 +29,6 @@ function craft_plan.buildIndex(list, findByOutput)
         end
     end
 
-    -- Prefer findByOutput if provided (same order as craft.findByOutput).
     if findByOutput then
         for name in pairs(byOutput) do
             local recipe, outStack = findByOutput(list, name)
@@ -43,7 +42,7 @@ function craft_plan.buildIndex(list, findByOutput)
     local visiting = {}
 
     local function depthOf(itemId)
-        if depthMemo[itemId] then
+        if depthMemo[itemId] ~= nil then
             return depthMemo[itemId]
         end
         if visiting[itemId] then
@@ -85,8 +84,59 @@ function craft_plan.batchTimes(recipe, ready, runsWanted)
     return batchTimes(recipe, ready, runsWanted)
 end
 
---- Top-down demand. Root uses produce-N (ignores fridge); intermediates use have+inflight.
--- Returns: need[item]=wantUnits, deficit[item]=stillProduce, hard missing or nil
+--- Collect item/fluid names reachable from root (for snapshot preload). Lightweight, no peripherals.
+function craft_plan.collectNames(index, rootItemId)
+    local items = {}
+    local fluids = {}
+    local seenItem = {}
+    local seenFluid = {}
+    local visiting = {}
+
+    local function addItem(name)
+        if name and not seenItem[name] then
+            seenItem[name] = true
+            items[#items + 1] = name
+        end
+    end
+
+    local function addFluid(name)
+        if name and not seenFluid[name] then
+            seenFluid[name] = true
+            fluids[#fluids + 1] = name
+        end
+    end
+
+    local function walk(itemId)
+        if not itemId or visiting[itemId] then
+            return
+        end
+        visiting[itemId] = true
+        addItem(itemId)
+        local entry = index.byOutput[itemId]
+        if not entry then
+            visiting[itemId] = nil
+            return
+        end
+        local recipe = entry.recipe
+        for i = 1, #recipe.inputs do
+            local input = recipe.inputs[i]
+            if input.fluid then
+                addFluid(input.name)
+            else
+                addItem(input.name)
+                if craft_stock.isCraftableName(input.name) and index.byOutput[input.name] then
+                    walk(input.name)
+                end
+            end
+        end
+        visiting[itemId] = nil
+    end
+
+    walk(rootItemId)
+    return items, fluids
+end
+
+--- Top-down demand using snap only (no extra peripheral scans).
 function craft_plan.computeDemand(index, rootItemId, rootStill, snap, inflight)
     local need = {}
     local deficit = {}
@@ -135,54 +185,58 @@ function craft_plan.computeDemand(index, rootItemId, rootStill, snap, inflight)
 
         for i = 1, #recipe.inputs do
             local input = recipe.inputs[i]
+            local needAmt = input.count * runsWanted
             if input.fluid then
                 local haveF, info = snap.fluid(input.name)
-                local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
-                if (not info or haveF < input.count) and ready < 1 then
+                if not info then
                     hard = {
                         error = "missing_input",
                         missing = {
                             name = input.name,
-                            count = input.count - (haveF or 0),
+                            count = needAmt,
                             fluid = true,
-                            error = (not info) and "no_fluid_source" or nil,
+                            error = "no_fluid_source",
+                        },
+                    }
+                elseif haveF < input.count then
+                    -- Only hard-fail when not even one set can run.
+                    hard = hard or {
+                        error = "missing_input",
+                        missing = {
+                            name = input.name,
+                            count = input.count - haveF,
+                            fluid = true,
                         },
                     }
                 end
             elseif craft_stock.isCraftableName(input.name) then
                 if index.byOutput[input.name] then
-                    consider(input.name, input.count * runsWanted)
+                    consider(input.name, needAmt)
                 else
                     local haveI = snap.item(input.name)
-                    if haveI < input.count * runsWanted then
-                        local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
-                        if ready < 1 then
-                            hard = {
-                                error = "missing_input",
-                                missing = {
-                                    name = input.name,
-                                    count = input.count * runsWanted - haveI,
-                                    fluid = false,
-                                },
-                            }
-                        end
+                    if haveI < input.count then
+                        hard = hard or {
+                            error = "missing_input",
+                            missing = {
+                                name = input.name,
+                                count = input.count - haveI,
+                                fluid = false,
+                            },
+                        }
                     end
                 end
             else
                 local haveI = snap.item(input.name)
-                if haveI < input.count * runsWanted then
-                    local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
-                    if ready < 1 then
-                        hard = {
-                            error = "missing_input",
-                            missing = {
-                                name = input.name,
-                                count = input.count * runsWanted - haveI,
-                                fluid = false,
-                                tag = true,
-                            },
-                        }
-                    end
+                if haveI < input.count then
+                    hard = hard or {
+                        error = "missing_input",
+                        missing = {
+                            name = input.name,
+                            count = input.count - haveI,
+                            fluid = false,
+                            tag = true,
+                        },
+                    }
                 end
             end
         end
@@ -194,8 +248,7 @@ function craft_plan.computeDemand(index, rootItemId, rootStill, snap, inflight)
     return need, deficit, hard
 end
 
---- Ready jobs sorted depth DESC, batch DESC, itemId ASC. One job per machine after sort.
--- reservedMachines: recipeKey already running on machine (allow same-key stack only).
+--- Ready jobs sorted depth DESC, batch DESC, itemId ASC.
 function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMachines, rootItemId)
     local candidates = {}
 
@@ -206,33 +259,36 @@ function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMach
                 local recipe = entry.recipe
                 local outStack = entry.outStack
                 local per = outStack.count
-                local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
-                if ready >= 1 then
-                    local machine = resolveMachine(recipe)
-                    local recipeKey = recipes.recipeKey(recipe)
-                    local reserved = reservedMachines and reservedMachines[machine]
-                    local okMachine = machine
-                        and machine_lock.canStack(machine, recipeKey)
-                        and (not reserved or reserved == recipeKey)
-                    if okMachine then
-                        local runsWanted = math.ceil(still / per)
-                        local times = batchTimes(recipe, ready, runsWanted)
-                        candidates[#candidates + 1] = {
-                            itemId = itemId,
-                            recipe = recipe,
-                            outStack = outStack,
-                            machine = machine,
-                            recipeKey = recipeKey,
-                            isRoot = itemId == rootItemId,
-                            runsWanted = runsWanted,
-                            times = times,
-                            depth = index.depth[itemId] or 0,
-                            deficit = still,
-                        }
+                if per and per > 0 then
+                    local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
+                    if ready >= 1 then
+                        local machine = resolveMachine(recipe)
+                        local recipeKey = recipes.recipeKey(recipe)
+                        local reserved = reservedMachines and reservedMachines[machine]
+                        local okMachine = machine
+                            and machine_lock.canStack(machine, recipeKey)
+                            and (not reserved or reserved == recipeKey)
+                        if okMachine then
+                            local runsWanted = math.ceil(still / per)
+                            local times = batchTimes(recipe, ready, runsWanted)
+                            candidates[#candidates + 1] = {
+                                itemId = itemId,
+                                recipe = recipe,
+                                outStack = outStack,
+                                machine = machine,
+                                recipeKey = recipeKey,
+                                isRoot = itemId == rootItemId,
+                                runsWanted = runsWanted,
+                                times = times,
+                                depth = index.depth[itemId] or 0,
+                                deficit = still,
+                            }
+                        end
                     end
                 end
             end
         end
+        sleep(0) -- yield while scanning candidates
     end
 
     table.sort(candidates, function(a, b)
@@ -242,15 +298,14 @@ function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMach
         if a.times ~= b.times then
             return a.times > b.times
         end
-        return a.itemId < b.itemId
+        return tostring(a.itemId) < tostring(b.itemId)
     end)
 
     local jobs = {}
     local seenMachine = {}
     for i = 1, #candidates do
         local job = candidates[i]
-        if not seenMachine[job.machine] then
-            -- Prefer deepest/largest batch; skip if another worker already holds a different key.
+        if job.machine and not seenMachine[job.machine] then
             if not machine_lock.isBusy(job.machine) or machine_lock.keyOf(job.machine) == job.recipeKey then
                 seenMachine[job.machine] = true
                 jobs[#jobs + 1] = job

@@ -1,6 +1,5 @@
 -- Continuous craft monitor: top-down demand, bottom-up dispatch.
--- Each tick: snapshot → plan → run ready jobs on free machines → replan immediately.
--- Activity only after a confirmed batch under lock. All job errors are caught.
+-- Planning uses a one-scan inventory snapshot with yields (no silent host kill).
 
 local recipes = require("recipes")
 local craft_stock = require("craft_stock")
@@ -56,6 +55,30 @@ local function unitsFromDetail(job, detail, fallbackSets)
     return per * sets
 end
 
+local function planTick(deps, index, store, opts, rootItemId, rootStill, inflight, preloadItems, preloadFluids)
+    local snap = craft_stock.snapshot(store, opts, preloadItems, preloadFluids)
+    local _need, deficit, hard = craft_plan.computeDemand(
+        index,
+        rootItemId,
+        rootStill,
+        snap,
+        inflight
+    )
+    local jobs = craft_plan.readyJobs(
+        index,
+        deficit,
+        snap,
+        deps.resolveMachine,
+        nil,
+        rootItemId
+    )
+    return {
+        deficit = deficit,
+        hard = hard,
+        jobs = jobs,
+    }
+end
+
 --- deps: findByOutput, resolveMachine, run, runGrow
 function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
     local store = opts.store
@@ -64,6 +87,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
     local hardSticky = nil
     local inflight = {}
     local index = craft_plan.buildIndex(list, deps.findByOutput)
+    local preloadItems, preloadFluids = craft_plan.collectNames(index, rootItemId)
 
     local function rootDone()
         return rootCrafted >= rootWant
@@ -169,7 +193,6 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
         return nil
     end
 
-    --- Run one job; catch all errors so parallel never kills the request silently.
     local function safeRun(job, slot)
         local ran, ok, detail, gained = pcall(function()
             return executeJob(job)
@@ -192,30 +215,25 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
     emitActivity(opts, "planning...")
 
     while not rootDone() do
-        sleep(0) -- always yield between plan ticks (avoid "too long without yielding")
+        sleep(0)
 
-        local snap = craft_stock.snapshot(store, opts)
-        local _need, deficit, hard = craft_plan.computeDemand(
-            index,
-            rootItemId,
-            rootWant - rootCrafted,
-            snap,
-            inflight
+        local tickOk, tick = pcall(planTick,
+            deps, index, store, opts, rootItemId, rootWant - rootCrafted,
+            inflight, preloadItems, preloadFluids
         )
+        if not tickOk then
+            return false, {
+                error = "exception",
+                missing = { name = "planning: " .. tostring(tick), count = 1 },
+            }
+        end
+
+        local hard = tick.hard
+        local jobs = tick.jobs
         if hard then
             hardSticky = hard
         end
 
-        local jobs = craft_plan.readyJobs(
-            index,
-            deficit,
-            snap,
-            deps.resolveMachine,
-            nil,
-            rootItemId
-        )
-
-        -- Only free machines; bottom-up order already applied.
         local wave = {}
         local claimed = {}
         for i = 1, #jobs do
@@ -256,7 +274,6 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, log)
                 end
             end)
             if not parOk then
-                -- Release inflight for the whole wave on catastrophic parallel failure.
                 for i = 1, #wave do
                     local job = wave[i]
                     local reserved = job.reserved or 0

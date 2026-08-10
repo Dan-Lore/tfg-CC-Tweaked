@@ -385,11 +385,14 @@ local function doCraft()
     state.busy = false
     state.activity = ""
     if not ran then
-        setStatus("ERR " .. tostring(err), "error")
+        print("craft error: " .. tostring(err))
+        setStatus("ERR " .. tostring(err):sub(1, math.max(1, W - 4)), "error")
     elseif ok then
         setStatus("OK +" .. tostring(detail.produced), "ok")
     else
-        setStatus(formatError(detail), "error")
+        local msg = formatError(detail)
+        print("craft fail: " .. tostring(msg))
+        setStatus(msg, "error")
     end
     draw()
 end

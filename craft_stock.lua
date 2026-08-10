@@ -1,5 +1,5 @@
 -- Stock counting and recipe input availability (count == pull sources).
--- Supports a per-tick snapshot so planners don't re-scan peripherals repeatedly.
+-- Snapshots scan each inventory once per tick (with yields) instead of per-item.
 
 local transfer = require("transfer")
 
@@ -59,16 +59,51 @@ function craft_stock.countFluidAvailable(store, fluidOrTag)
     return transfer.countFluid(info.peripheral, info.fluid), info
 end
 
---- Lazy stock snapshot: counts each item/fluid at most once per tick.
-function craft_stock.snapshot(store, opts)
+--- Build a stock snapshot by scanning each unique inventory once.
+-- itemNames / fluidNames: optional lists to preload (others counted lazily with yield).
+function craft_stock.snapshot(store, opts, itemNames, fluidNames)
     local snap = {
         store = store,
         opts = opts,
         items = {},
-        fluids = {}, -- name -> { have=, info= }
+        fluids = {},
         _itemDone = {},
         _fluidDone = {},
+        _invCache = {}, -- invName -> { itemName -> count }
     }
+
+    local function scanInv(invName)
+        if snap._invCache[invName] then
+            return snap._invCache[invName]
+        end
+        local bag = {}
+        if invName and peripheral.isPresent(invName) then
+            local inv = peripheral.wrap(invName)
+            if inv and inv.list then
+                local ok, listed = pcall(inv.list)
+                if ok and listed then
+                    for _, item in pairs(listed) do
+                        if item and item.name then
+                            bag[item.name] = (bag[item.name] or 0) + (item.count or 0)
+                        end
+                    end
+                end
+            end
+        end
+        snap._invCache[invName] = bag
+        sleep(0) -- yield after each peripheral scan
+        return bag
+    end
+
+    local function countItemNow(name)
+        local total = 0
+        local sources = craft_stock.pullSourcesFor(store, name, opts)
+        for i = 1, #sources do
+            local bag = scanInv(sources[i])
+            total = total + (bag[name] or 0)
+        end
+        return total
+    end
 
     function snap.item(name)
         if not name then
@@ -78,7 +113,7 @@ function craft_stock.snapshot(store, opts)
             return snap.items[name] or 0
         end
         snap._itemDone[name] = true
-        local n = craft_stock.countAvailable(store, name, opts)
+        local n = countItemNow(name)
         snap.items[name] = n
         return n
     end
@@ -97,7 +132,26 @@ function craft_stock.snapshot(store, opts)
         snap._fluidDone[fluidOrTag] = true
         local have, info = craft_stock.countFluidAvailable(store, fluidOrTag)
         snap.fluids[fluidOrTag] = { have = have, info = info }
+        sleep(0)
         return have, info
+    end
+
+    --- Preload names with yields (call before heavy planning).
+    function snap.preload(items, fluids)
+        if items then
+            for i = 1, #items do
+                snap.item(items[i])
+            end
+        end
+        if fluids then
+            for i = 1, #fluids do
+                snap.fluid(fluids[i])
+            end
+        end
+    end
+
+    if itemNames or fluidNames then
+        snap.preload(itemNames, fluidNames)
     end
 
     return snap
@@ -189,7 +243,7 @@ function craft_stock.countCompleteSets(recipe, store, opts, snap)
                 have = craft_stock.countAvailable(store, input.name, opts)
             end
         end
-        local can = math.floor(have / per)
+        local can = math.floor((have or 0) / per)
         if sets == nil or can < sets then
             sets = can
         end
