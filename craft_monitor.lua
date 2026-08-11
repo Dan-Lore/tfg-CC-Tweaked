@@ -140,7 +140,9 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
             if job.recipe.flag == "grow" then
                 if not job.isRoot then
                     local have = craft_stock.countAvailable(store, job.itemId, opts)
-                    if have >= (job.deficit or 0) then
+                    -- wantUnits is absolute need; deficit is already (want-have) and must NOT be compared to have.
+                    local want = job.wantUnits or 0
+                    if want <= 0 or have >= want then
                         return false, { error = "skipped", skipped = true, reason = "have" }
                     end
                 elseif rootCrafted >= rootWant then
