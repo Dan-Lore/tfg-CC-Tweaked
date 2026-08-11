@@ -7,6 +7,12 @@
 -- storage.cfg optional keys:
 --   mill_interval | 5     -- seconds between idle polls
 --   mill_batch    | 32    -- max recipe sets per craft.run
+--
+-- Bundle:  python tools/bundle_project.py craft wheat_grain
+-- Deploy:  dist/wheat_grain.lua + recipes.cfg + storage.cfg
+
+package.path = package.path
+    .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"
 
 local craft = require("craft")
 local storage = require("storage")

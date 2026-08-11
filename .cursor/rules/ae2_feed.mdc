@@ -1,0 +1,41 @@
+---
+description: Context for ae2_feed — even N-item feed from storages to machines
+globs: ae2_feed/**/*
+alwaysApply: false
+---
+
+# ae2_feed
+
+CC: Tweaked script for TerraFirmaGreg. **Only job:** discover storages + machines on a wired modem network, push **exactly N** of the current storage item into each free machine, evenly and as fast as CC allows (`sleep(0)` yield only).
+
+## Not in scope
+
+- No pattern providers / AE2 return path
+- No draining machines
+- No greenhouse / craft UI code
+
+## Layout
+
+Storages (crate/barrel/…) and identical GT machines on one wired network. Something else (AE2, pipes) fills storages; this script only splits into machines.
+
+## Modules
+
+- `config.lua` — `N`, optional explicit `STORAGES` / `MACHINES`, optional substr filters
+- `discover.lua` — classify inventories (auto keywords or explicit lists)
+- `move.lua` — count / free / distribute via `shared/transfer.lua`
+- `main.lua` — hotplug rescan + feed loop
+
+## Deploy
+
+```text
+python tools/bundle_project.py ae2_feed
+```
+
+Copy `dist/ae2_feed.lua` to the computer. Edit `N` in the bundled config section or in `ae2_feed/config.lua` before rebuild.
+
+## Conventions
+
+- Keep `require("transfer")` short names; bundler resolves `shared/`
+- Prefer inventory-agnostic peripheral names from discovery/config — never hard-code a single crate/machine id in logic
+- Free machine = zero count of the current input item (ready for a fresh N-set)
+- Do not add timed sleeps; only `sleep(0)` for CC yield

@@ -1,5 +1,12 @@
 -- Craft UI: pick output item + amount on a monitor.
 -- Inventory / monitor settings come from storage.cfg (no hard-coded fridge).
+--
+-- Modular: run from craft/ with shared/ on the computer (or repo root layout).
+-- Bundle:  python tools/bundle_project.py craft craft_ui
+-- Deploy:  dist/craft_ui.lua + recipes.cfg + storage.cfg
+
+package.path = package.path
+    .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"
 
 local craft = require("craft")
 local storage = require("storage")

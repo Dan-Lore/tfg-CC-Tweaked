@@ -1,14 +1,18 @@
--- AE2 feed balancer settings.
--- Only N is required: items pushed into each machine per craft cycle.
--- AE2 must supply exact multiples of N across the provider→machine farm.
+-- Even N-per-machine feed from storages.
+-- Auto-detect storages (crate/barrel/chest/…) and machines, or pin names explicitly.
 
 return {
+    -- Items pushed into each free machine per cycle.
     N = 16,
 
-    -- Substring match against peripheral name or type (case-insensitive).
-    PROVIDER_SUBSTR = "pattern_provider",
+    -- Explicit names replace auto for that role when non-empty.
+    -- STORAGES = { "gtceu:stainless_steel_crate_1" },
+    -- MACHINES = { "gtceu:hv_extruder_4", "gtceu:hv_extruder_5" },
 
-    -- Optional: if set, only peripherals whose name/type contain this count as machines.
-    -- Leave nil when the wired network has only machines + pattern providers.
-    -- MACHINE_SUBSTR = nil,
+    -- Auto needles when explicit list is unset.
+    -- nil = built-in storage keywords; string or { "crate", "barrel" } = custom.
+    STORAGE_SUBSTR = nil,
+
+    -- Optional machine filter; nil = every non-storage inventory.
+    -- MACHINE_SUBSTR = "extruder",
 }

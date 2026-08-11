@@ -1,4 +1,4 @@
--- Classify wired-network inventories into pattern providers vs machines.
+-- Classify wired-network inventories into storages vs machines.
 
 local discover = {}
 
@@ -16,6 +16,27 @@ local SKIP_TYPES = {
     redstone = true,
 }
 
+local LOCAL_SIDES = {
+    left = true,
+    right = true,
+    top = true,
+    bottom = true,
+    front = true,
+    back = true,
+}
+
+local DEFAULT_STORAGE_NEEDLES = {
+    "crate",
+    "barrel",
+    "chest",
+    "drawer",
+    "shulker",
+    "drum",
+    "toolbox",
+    "locker",
+    "cabinet",
+}
+
 local function peripheralTypes(name)
     local ok, ptype = pcall(peripheral.getType, name)
     if not ok or not ptype then
@@ -29,6 +50,9 @@ end
 
 local function shouldSkip(name, types)
     local lowerName = tostring(name):lower()
+    if LOCAL_SIDES[lowerName] then
+        return true
+    end
     for i = 1, #types do
         local t = tostring(types[i]):lower()
         if SKIP_TYPES[t] then
@@ -49,16 +73,31 @@ local function isInventory(name)
     return inv and type(inv.list) == "function" and type(inv.pushItems) == "function"
 end
 
-local function matchesSubstr(name, types, substr)
-    if not substr or substr == "" then
+local function matchesNeedle(name, types, needle)
+    if not needle or needle == "" then
         return false
     end
-    local needle = tostring(substr):lower()
-    if tostring(name):lower():find(needle, 1, true) then
+    local n = tostring(needle):lower()
+    if tostring(name):lower():find(n, 1, true) then
         return true
     end
     for i = 1, #types do
-        if tostring(types[i]):lower():find(needle, 1, true) then
+        if tostring(types[i]):lower():find(n, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function matchesAny(name, types, needles)
+    if not needles then
+        return false
+    end
+    if type(needles) == "string" then
+        return matchesNeedle(name, types, needles)
+    end
+    for i = 1, #needles do
+        if matchesNeedle(name, types, needles[i]) then
             return true
         end
     end
@@ -70,26 +109,70 @@ local function sortNames(list)
     return list
 end
 
---- Scan the network. Returns { machines = {...}, providers = {...} }.
--- cfg.PROVIDER_SUBSTR — required match for providers (default pattern_provider).
--- cfg.MACHINE_SUBSTR — optional filter for machines; nil = all non-provider inventories.
-function discover.scan(cfg)
-    cfg = cfg or {}
-    local providerSub = cfg.PROVIDER_SUBSTR or "pattern_provider"
-    local machineSub = cfg.MACHINE_SUBSTR
+local function explicitList(cfgValue)
+    if type(cfgValue) ~= "table" or #cfgValue == 0 then
+        return nil
+    end
+    return cfgValue
+end
 
-    local names = peripheral.getNames()
-    local machines = {}
-    local providers = {}
-
+local function resolveExplicit(names, label)
+    local out = {}
     for i = 1, #names do
         local name = names[i]
-        local types = peripheralTypes(name)
-        if not shouldSkip(name, types) and isInventory(name) then
-            if matchesSubstr(name, types, providerSub) then
-                providers[#providers + 1] = name
-            elseif machineSub == nil or machineSub == "" or matchesSubstr(name, types, machineSub) then
-                machines[#machines + 1] = name
+        if peripheral.isPresent(name) and isInventory(name) then
+            out[#out + 1] = name
+        else
+            print(("ae2_feed: missing %s %s"):format(label, tostring(name)))
+        end
+    end
+    return sortNames(out)
+end
+
+local function nameSet(list)
+    local set = {}
+    for i = 1, #list do
+        set[list[i]] = true
+    end
+    return set
+end
+
+--- Returns { machines = {...}, storages = {...} }.
+function discover.scan(cfg)
+    cfg = cfg or {}
+
+    local explicitStorages = explicitList(cfg.STORAGES)
+    local explicitMachines = explicitList(cfg.MACHINES)
+
+    local storageNeedles = cfg.STORAGE_SUBSTR
+    if storageNeedles == nil then
+        storageNeedles = DEFAULT_STORAGE_NEEDLES
+    end
+    local machineNeedles = cfg.MACHINE_SUBSTR
+
+    local storages = explicitStorages and resolveExplicit(explicitStorages, "storage") or {}
+    local machines = explicitMachines and resolveExplicit(explicitMachines, "machine") or {}
+
+    local taken = nameSet(storages)
+    for i = 1, #machines do
+        taken[machines[i]] = true
+    end
+
+    local names = peripheral.getNames()
+    for i = 1, #names do
+        local name = names[i]
+        if not taken[name] then
+            local types = peripheralTypes(name)
+            if not shouldSkip(name, types) and isInventory(name) then
+                if not explicitStorages and matchesAny(name, types, storageNeedles) then
+                    storages[#storages + 1] = name
+                    taken[name] = true
+                elseif not explicitMachines then
+                    if machineNeedles == nil or machineNeedles == "" or matchesAny(name, types, machineNeedles) then
+                        machines[#machines + 1] = name
+                        taken[name] = true
+                    end
+                end
             end
         end
         if i % 8 == 0 then
@@ -99,19 +182,19 @@ function discover.scan(cfg)
 
     return {
         machines = sortNames(machines),
-        providers = sortNames(providers),
+        storages = sortNames(storages),
     }
 end
 
 function discover.printSummary(net)
     local m = net and net.machines or {}
-    local p = net and net.providers or {}
-    print(("ae2_feed: %d machine(s), %d provider(s)"):format(#m, #p))
-    for i = 1, #p do
-        print("  provider: " .. p[i])
+    local s = net and net.storages or {}
+    print(("ae2_feed: %d machine(s), %d storage(s)"):format(#m, #s))
+    for i = 1, #s do
+        print("  storage: " .. s[i])
     end
     for i = 1, #m do
-        print("  machine:  " .. m[i])
+        print("  machine: " .. m[i])
     end
 end
 

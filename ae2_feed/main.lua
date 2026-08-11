@@ -1,13 +1,10 @@
--- AE2 feed balancer: even N-per-machine feed from pattern providers + output return.
+-- Even N-per-machine feed from storages. No drain, no pattern providers.
 --
--- In-game layout (dedicated wired network):
---   identical GT machines + AE2 pattern providers + this computer (modems on all).
--- Do NOT let pattern providers auto-insert into a machine face — CC does the split.
---
--- Copy onto the computer: ae2_feed/* and root transfer.lua
--- Run: ae2_feed/main  (or paste startup to run this)
+-- Bundle:  python tools/bundle_project.py ae2_feed
+-- Deploy:  dist/ae2_feed.lua  (startup: shell.run("ae2_feed"))
 
-package.path = package.path .. ";/ae2_feed/?.lua;ae2_feed/?.lua;/?/?.lua"
+package.path = package.path
+    .. ";/ae2_feed/?.lua;ae2_feed/?.lua;/shared/?.lua;shared/?.lua"
 
 local config = require("config")
 local discover = require("discover")
@@ -15,11 +12,25 @@ local move = require("move")
 
 local N = tonumber(config.N) or 0
 if N <= 0 then
-    error("ae2_feed/config.lua: set N to items per machine per cycle (> 0)")
+    error("ae2_feed/config.lua: set N > 0")
 end
 
-local net = { machines = {}, providers = {} }
-local dirty = true
+local net = { machines = {}, storages = {} }
+local dirty = false
+-- Ignore peripheral events until the first start scan finishes (boot queues attaches).
+local armed = false
+local lastStatus = ""
+local lastStatusAt = 0
+
+local function setStatus(msg)
+    local now = os.clock()
+    if msg == lastStatus and (now - lastStatusAt) < 2 then
+        return
+    end
+    lastStatus = msg
+    lastStatusAt = now
+    print("ae2_feed: " .. msg)
+end
 
 local function rescan(reason)
     net = discover.scan(config)
@@ -28,20 +39,24 @@ local function rescan(reason)
         print("ae2_feed: rescan (" .. tostring(reason) .. ")")
     end
     discover.printSummary(net)
+    if #net.storages == 0 then
+        setStatus("no storages — auto crate/barrel/chest… or STORAGES = { \"name\" }")
+    elseif #net.machines == 0 then
+        setStatus("no machines found")
+    end
 end
 
 local function ensureNet()
-    if dirty or #net.machines == 0 or #net.providers == 0 then
+    if dirty or #net.machines == 0 or #net.storages == 0 then
         rescan(dirty and "hotplug" or "init")
     end
-    return #net.machines > 0 and #net.providers > 0
+    return #net.machines > 0 and #net.storages > 0
 end
 
--- Hotplug: mark dirty; main loop rescans without blocking on os.pullEvent.
 local function watchPeripherals()
     while true do
         local ev = os.pullEvent()
-        if ev == "peripheral" or ev == "peripheral_detach" then
+        if armed and (ev == "peripheral" or ev == "peripheral_detach") then
             dirty = true
         end
     end
@@ -49,29 +64,27 @@ end
 
 local function tick()
     if not ensureNet() then
-        return false
+        return
     end
 
-    local providers = net.providers
+    local storages = net.storages
     local machines = net.machines
-    local inputItem = move.firstProviderItem(providers)
-
-    -- Always return outputs (and any leftovers when idle) to providers first.
-    local drained = move.drainAll(machines, providers, inputItem)
-
+    local inputItem = move.firstItem(storages)
     if not inputItem then
-        return drained > 0
+        return
     end
 
     local free = move.freeMachines(machines, inputItem)
     if #free == 0 then
-        return drained > 0
+        setStatus("wait — no free machine for " .. inputItem)
+        return
     end
 
-    local stock = move.countProviders(providers, inputItem)
+    local stock = move.countInMany(storages, inputItem)
     local feeds = math.min(math.floor(stock / N), #free)
     if feeds <= 0 then
-        return drained > 0
+        setStatus(("wait — need %d x %s (have %d)"):format(N, inputItem, stock))
+        return
     end
 
     local targets = {}
@@ -79,22 +92,22 @@ local function tick()
         targets[i] = free[i]
     end
 
-    local fed = move.distribute(providers, targets, inputItem, N)
-    return drained > 0 or fed > 0
+    local fed = move.distribute(storages, targets, inputItem, N)
+    if fed > 0 then
+        setStatus(("fed %d x%d %s"):format(fed, N, inputItem))
+    else
+        setStatus("push failed — machine rejected items")
+    end
 end
 
 local function mainLoop()
     print(("ae2_feed: N=%d"):format(N))
     rescan("start")
-
+    dirty = false
+    armed = true
     while true do
-        local worked = tick()
-        -- Yield every pass so CC never hits "too long without yielding".
-        -- No timed sleep — poll as fast as the computer allows.
+        tick()
         sleep(0)
-        if not worked then
-            -- Still no delay beyond yield; next tick immediately after sleep(0).
-        end
     end
 end
 
