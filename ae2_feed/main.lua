@@ -17,8 +17,6 @@ end
 
 local net = { machines = {}, storages = {} }
 local dirty = false
--- Ignore peripheral events until the first start scan finishes (boot queues attaches).
-local armed = false
 local lastStatus = ""
 local lastStatusAt = 0
 
@@ -53,10 +51,25 @@ local function ensureNet()
     return #net.machines > 0 and #net.storages > 0
 end
 
-local function watchPeripherals()
+--- Drop everything currently queued (boot peripheral attaches, etc.).
+local function flushEvents()
+    os.queueEvent("ae2_feed_flush")
     while true do
         local ev = os.pullEvent()
-        if armed and (ev == "peripheral" or ev == "peripheral_detach") then
+        if ev == "ae2_feed_flush" then
+            return
+        end
+    end
+end
+
+--- Yield one tick and note any hotplug that arrived.
+local function yieldAndWatch()
+    local timer = os.startTimer(0)
+    while true do
+        local ev, p1 = os.pullEvent()
+        if ev == "timer" and p1 == timer then
+            return
+        elseif ev == "peripheral" or ev == "peripheral_detach" then
             dirty = true
         end
     end
@@ -100,15 +113,12 @@ local function tick()
     end
 end
 
-local function mainLoop()
-    print(("ae2_feed: N=%d"):format(N))
-    rescan("start")
-    dirty = false
-    armed = true
-    while true do
-        tick()
-        sleep(0)
-    end
-end
+print(("ae2_feed: N=%d"):format(N))
+rescan("start")
+flushEvents()
+dirty = false
 
-parallel.waitForAny(mainLoop, watchPeripherals)
+while true do
+    tick()
+    yieldAndWatch()
+end
