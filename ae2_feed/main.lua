@@ -1,18 +1,19 @@
 -- Even N-per-machine feed from storages. No drain, no pattern providers.
 --
 -- Bundle:  python tools/bundle_project.py ae2_feed
--- Deploy:  dist/ae2_feed.lua  (startup: shell.run("ae2_feed"))
+-- Deploy:  dist/ae2_feed.lua + ae2_feed.cfg  (startup: shell.run("ae2_feed"))
 
 package.path = package.path
     .. ";/ae2_feed/?.lua;ae2_feed/?.lua;/shared/?.lua;shared/?.lua"
 
-local config = require("config")
+local configMod = require("config")
 local discover = require("discover")
 local move = require("move")
 
+local config = configMod.load()
 local N = tonumber(config.N) or 0
 if N <= 0 then
-    error("ae2_feed/config.lua: set N > 0")
+    error("ae2_feed.cfg: set N | <amount> (> 0)")
 end
 
 local net = { machines = {}, storages = {} }
@@ -38,7 +39,7 @@ local function rescan(reason)
     end
     discover.printSummary(net)
     if #net.storages == 0 then
-        setStatus("no storages — auto crate/barrel/chest… or STORAGES = { \"name\" }")
+        setStatus("no storages — auto crate/barrel/chest… or storage | name in ae2_feed.cfg")
     elseif #net.machines == 0 then
         setStatus("no machines found")
     end

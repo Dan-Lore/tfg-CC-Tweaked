@@ -20,10 +20,11 @@ Storages (crate/barrel/…) and identical GT machines on one wired network. Some
 
 ## Modules
 
-- `config.lua` — `N`, optional explicit `STORAGES` / `MACHINES`, optional substr filters
+- `ae2_feed.cfg` — runtime settings (`N`, optional `storage` / `machine` / substr lines)
+- `config.lua` — parser for `ae2_feed.cfg`
 - `discover.lua` — classify inventories (auto keywords or explicit lists)
 - `move.lua` — count / free / distribute via `shared/transfer.lua`
-- `main.lua` — hotplug rescan + feed loop
+- `main.lua` — feed loop + hotplug (after boot event flush)
 
 ## Deploy
 
@@ -31,11 +32,11 @@ Storages (crate/barrel/…) and identical GT machines on one wired network. Some
 python tools/bundle_project.py ae2_feed
 ```
 
-Copy `dist/ae2_feed.lua` to the computer. Edit `N` in the bundled config section or in `ae2_feed/config.lua` before rebuild.
+Copy **both** `dist/ae2_feed.lua` and `ae2_feed/ae2_feed.cfg` onto the computer (same folder). Edit the `.cfg` in-game; no rebuild needed for `N` / names.
 
 ## Conventions
 
-- Keep `require("transfer")` short names; bundler resolves `shared/`
-- Prefer inventory-agnostic peripheral names from discovery/config — never hard-code a single crate/machine id in logic
+- Keep short `require` names; bundler resolves `shared/`
+- Prefer inventory-agnostic peripheral names from discovery/cfg — never hard-code a single crate/machine id in logic
 - Free machine = zero count of the current input item (ready for a fresh N-set)
-- Do not add timed sleeps; only `sleep(0)` for CC yield
+- Do not add timed sleeps; only `sleep(0)` / zero-timer yield

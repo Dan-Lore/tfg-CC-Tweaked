@@ -6,6 +6,7 @@ Usage:
   python tools/bundle_project.py craft craft_ui
   python tools/bundle_project.py craft greenhouse_clean
   python tools/bundle_project.py craft wheat_grain
+  python tools/bundle_project.py craft pizza_maintain
 
 Resolves require("name") from <project>/ then shared/. Writes dist/<entry>.lua
 """
@@ -33,6 +34,9 @@ EXTRA_REQUIRES: dict[str, tuple[str, ...]] = {
 
 CRAFT_CFG_HINT = (
     "-- Also copy craft/recipes.cfg and craft/storage.cfg next to this file on the computer."
+)
+AE2_FEED_CFG_HINT = (
+    "-- Also copy ae2_feed/ae2_feed.cfg next to this file on the computer."
 )
 
 
@@ -112,12 +116,14 @@ def build_bundle(
     parts.append(f"-- Bundled from {project}/{entry}.lua — do not edit by hand; rebuild with tools/bundle_project.py\n")
     if project == "craft":
         parts.append(CRAFT_CFG_HINT + "\n")
+    elif project == "ae2_feed":
+        parts.append(AE2_FEED_CFG_HINT + "\n")
     parts.append("-- Generated package.preload modules + entrypoint.\n\n")
 
     for name, path in modules.items():
         src = read_text(path)
         parts.append(f"-- module: {name} ({path.relative_to(REPO_ROOT).as_posix()})\n")
-        parts.append(wrap_preload(name, src, mark_config=(project == "ae2_feed")))
+        parts.append(wrap_preload(name, src, mark_config=False))
         parts.append("\n")
 
     entry_body = strip_package_path(entry_src)
