@@ -21,12 +21,16 @@ local DRAIN_OVERRIDE_FE_S = -80000
 local COOLDOWN_TIME = 20
 local MEASURE_INTERVAL = 5
 local MAX_HISTORY = 4
+-- GT multiblocks often attach seconds after CC boots on world load
+local BOOT_WAIT_SEC = 120
+local BOOT_POLL_SEC = 2
 
 -- ========================= STATE =========================
 local turbines = {}
 local substation = nil
 local substationName = nil
 local monitor = nil
+local netDirty = false
 
 local energyHistory = {}
 local tickCounter = 0
@@ -44,6 +48,35 @@ end
 
 local function indexFromName(name)
     return tonumber(name:match("_(%d+)$"))
+end
+
+local function networkSummary()
+    return table.concat(peripheral.getNames(), ", ")
+end
+
+--- Drop queued boot attaches so the first wait starts clean.
+local function flushEvents()
+    os.queueEvent("power_ctrl_flush")
+    while true do
+        local ev = os.pullEvent()
+        if ev == "power_ctrl_flush" then
+            return
+        end
+    end
+end
+
+--- Sleep, but wake early on peripheral hotplug.
+local function sleepWatch(seconds)
+    local timer = os.startTimer(seconds)
+    while true do
+        local ev, p1 = os.pullEvent()
+        if ev == "timer" and p1 == timer then
+            return false
+        elseif ev == "peripheral" or ev == "peripheral_detach" then
+            netDirty = true
+            return true
+        end
+    end
 end
 
 local function discoverSubstation()
@@ -102,30 +135,112 @@ local function discoverTurbines()
     return list
 end
 
+local function syncTurbineFlags(list)
+    for _, t in ipairs(list) do
+        t.workingEnabled = safeCall(t.name, "isWorkingEnabled") == true
+        if t.workingEnabled and not t.enabledAt then
+            t.enabledAt = os.clock()
+        elseif not t.workingEnabled then
+            t.enabledAt = nil
+        end
+    end
+end
+
+--- Rebuild turbine list; keep runtime stats for names that stayed online.
+local function applyTurbineList(list)
+    local prev = {}
+    for _, t in ipairs(turbines) do
+        prev[t.name] = t
+    end
+    for _, t in ipairs(list) do
+        local old = prev[t.name]
+        if old then
+            t.totalRunTime = old.totalRunTime
+            t.lastSpeed = old.lastSpeed
+            t.lastProduction = old.lastProduction
+            t.enabledAt = old.enabledAt
+        end
+    end
+    syncTurbineFlags(list)
+    turbines = list
+    netDirty = false
+end
+
+local function waitForSubstation(timeoutSec)
+    local deadline = os.clock() + timeoutSec
+    while true do
+        substation, substationName = discoverSubstation()
+        if substation then
+            return true
+        end
+        if os.clock() >= deadline then
+            return false
+        end
+        print("Ждём подстанцию... " .. networkSummary())
+        sleepWatch(BOOT_POLL_SEC)
+    end
+end
+
+local function waitForTurbines(timeoutSec)
+    local deadline = os.clock() + timeoutSec
+    local lastPrint = 0
+    while true do
+        local list = discoverTurbines()
+        if #list > 0 then
+            applyTurbineList(list)
+            return true
+        end
+        if os.clock() >= deadline then
+            return false
+        end
+        local now = os.clock()
+        if now - lastPrint >= 5 then
+            print("Ждём турбины (*" .. TURBINE_SUBSTR .. "*)... " .. networkSummary())
+            lastPrint = now
+        end
+        sleepWatch(BOOT_POLL_SEC)
+    end
+end
+
+local function rescanNetwork(reason)
+    local list = discoverTurbines()
+    if #list == 0 then
+        if #turbines > 0 then
+            print("Турбины пропали из сети, ждём...")
+            turbines = {}
+        end
+        netDirty = false
+        return false
+    end
+    local before = #turbines
+    applyTurbineList(list)
+    if reason and #list ~= before then
+        print(("Рескан (%s): турбин %d"):format(tostring(reason), #list))
+    end
+    return true
+end
+
 local function init()
-    substation, substationName = discoverSubstation()
-    if not substation then
-        error("Подстанция не найдена (искали " .. tostring(SUBSTATION_NAME) .. " / *" .. SUBSTATION_SUBSTR .. "*)")
+    flushEvents()
+    netDirty = false
+
+    if not waitForSubstation(BOOT_WAIT_SEC) then
+        error("Подстанция не найдена (искали " .. tostring(SUBSTATION_NAME)
+            .. " / *" .. SUBSTATION_SUBSTR .. "*). Сеть: " .. networkSummary())
     end
 
     monitor = discoverMonitor()
     if monitor then
         monitor.clear()
         monitor.setTextScale(0.5)
+        monitor.setCursorPos(1, 1)
+        monitor.write("Waiting for turbines...")
     end
 
-    turbines = discoverTurbines()
-    if #turbines == 0 then
-        local names = table.concat(peripheral.getNames(), ", ")
-        error("Турбины не найдены (*" .. TURBINE_SUBSTR .. "*). Сеть: " .. names)
-    end
-
-    for _, t in ipairs(turbines) do
-        t.workingEnabled = safeCall(t.name, "isWorkingEnabled") == true
-        t.lastSpeed = 0
-        if t.workingEnabled then
-            t.enabledAt = os.clock()
-        end
+    if not waitForTurbines(BOOT_WAIT_SEC) then
+        print("Турбины ещё не в сети после " .. BOOT_WAIT_SEC
+            .. "с — ждём дальше. Сеть: " .. networkSummary())
+        turbines = {}
     end
 end
 
@@ -332,6 +447,17 @@ local function draw()
     monitor.clear()
     monitor.setCursorPos(1, 1)
 
+    if #turbines == 0 then
+        monitor.write("=== GTCEU POWER CTRL ===")
+        monitor.setCursorPos(1, 3)
+        monitor.setTextColor(colors.yellow)
+        monitor.write("Waiting for turbines...")
+        monitor.setTextColor(colors.white)
+        monitor.setCursorPos(1, 5)
+        monitor.write(networkSummary())
+        return
+    end
+
     local ratio, energy, capacity = getEnergyRatio()
     local delta = lastDelta
     local deltaEuT = delta / 20
@@ -380,11 +506,10 @@ local function draw()
     end
 
     monitor.setCursorPos(1, 7)
-    -- getCurrentProduction is EU/t; delta is FE/s (≈ EU/s)
     monitor.write(string.format("Prod: %d EU/t", totalProduction()))
 
     monitor.setCursorPos(1, 9)
-    monitor.write("Turbines (spd%%/EU/t/run):")
+    monitor.write("Turbines (spd%/EU/t/run):")
 
     for i, t in ipairs(turbines) do
         local status = t.workingEnabled and "ON " or "OFF"
@@ -408,6 +533,7 @@ local function draw()
 end
 
 local function main()
+    print("Старт power ctrl, ждём периферию до " .. BOOT_WAIT_SEC .. "с...")
     init()
     print("Подстанция: " .. tostring(substationName))
     print("Турбин: " .. #turbines)
@@ -420,21 +546,35 @@ local function main()
 
     local measureCounter = 0
     while true do
-        local ratio = getEnergyRatio()
-
-        -- Critical protection every second (not only on measure ticks)
-        if ratio > THRESHOLD_CRITICAL then
-            updateTurbinesCritical(ratio)
+        if netDirty or #turbines == 0 then
+            if not rescanNetwork(netDirty and "hotplug" or "retry") then
+                draw()
+                sleepWatch(BOOT_POLL_SEC)
+            end
         end
 
-        measureCounter = measureCounter + 1
-        if measureCounter >= MEASURE_INTERVAL then
-            addEnergyMeasurement()
-            updateTurbineStats()
-            if ratio <= THRESHOLD_CRITICAL then
-                updateTurbines()
+        if #turbines > 0 then
+            if not substation or not peripheral.isPresent(substationName) then
+                substation, substationName = discoverSubstation()
             end
-            measureCounter = 0
+
+            if substation then
+                local ratio = getEnergyRatio()
+
+                if ratio > THRESHOLD_CRITICAL then
+                    updateTurbinesCritical(ratio)
+                end
+
+                measureCounter = measureCounter + 1
+                if measureCounter >= MEASURE_INTERVAL then
+                    addEnergyMeasurement()
+                    updateTurbineStats()
+                    if ratio <= THRESHOLD_CRITICAL then
+                        updateTurbines()
+                    end
+                    measureCounter = 0
+                end
+            end
         end
 
         if cooldownCounter > 0 then
@@ -442,7 +582,7 @@ local function main()
         end
 
         draw()
-        sleep(1)
+        sleepWatch(1)
     end
 end
 
