@@ -3,12 +3,14 @@
 
 Usage:
   python tools/bundle_project.py ae2_feed
+  python tools/bundle_project.py crystals
   python tools/bundle_project.py craft craft_ui
   python tools/bundle_project.py craft greenhouse_clean
   python tools/bundle_project.py craft wheat_grain
   python tools/bundle_project.py craft pizza_maintain
 
-Resolves require("name") from <project>/ then shared/. Writes dist/<entry>.lua
+Resolves require("name") from <project>/ then shared/. Writes dist/<entry>.lua.
+Projects in EMBED_CFG also bake <project>/*.cfg into the bundle as cfg_embed.
 """
 
 from __future__ import annotations
@@ -38,6 +40,15 @@ CRAFT_CFG_HINT = (
 AE2_FEED_CFG_HINT = (
     "-- Also copy ae2_feed/ae2_feed.cfg next to this file on the computer."
 )
+CRYSTALS_CFG_HINT = (
+    "-- Self-contained: config is embedded below (EDIT CONFIG). "
+    "Optional crystals.cfg on the computer overrides it."
+)
+
+# Projects that embed <project>/<name>.cfg as package.preload["cfg_embed"].
+EMBED_CFG: dict[str, str] = {
+    "crystals": "crystals.cfg",
+}
 
 
 def read_text(path: Path) -> str:
@@ -97,6 +108,30 @@ def topo_modules(
     return ordered
 
 
+def lua_long_string(text: str) -> str:
+    """Wrap text in a Lua long bracket string that cannot appear inside it."""
+    eq = 0
+    while True:
+        open_b = "[" + ("=" * eq) + "["
+        close_b = "]" + ("=" * eq) + "]"
+        if open_b not in text and close_b not in text:
+            return open_b + text + close_b
+        eq += 1
+
+
+def wrap_cfg_embed(cfg_text: str) -> str:
+    body = cfg_text.replace("\r\n", "\n").replace("\r", "\n")
+    if not body.endswith("\n"):
+        body += "\n"
+    parts: list[str] = []
+    parts.append("-- >>> EDIT CONFIG (crystals.cfg syntax) <<<\n")
+    parts.append(f"local EMBEDDED_CFG = {lua_long_string(body)}\n\n")
+    parts.append('package.preload["cfg_embed"] = function()\n')
+    parts.append("    return EMBEDDED_CFG\n")
+    parts.append("end\n\n")
+    return "".join(parts)
+
+
 def wrap_preload(name: str, src: str, mark_config: bool) -> str:
     parts: list[str] = [f'package.preload["{name}"] = function(...)\n']
     if mark_config and name == "config":
@@ -111,6 +146,7 @@ def build_bundle(
     entry: str,
     modules: OrderedDict[str, Path],
     entry_src: str,
+    embed_cfg_path: Path | None = None,
 ) -> str:
     parts: list[str] = []
     parts.append(f"-- Bundled from {project}/{entry}.lua — do not edit by hand; rebuild with tools/bundle_project.py\n")
@@ -118,7 +154,12 @@ def build_bundle(
         parts.append(CRAFT_CFG_HINT + "\n")
     elif project == "ae2_feed":
         parts.append(AE2_FEED_CFG_HINT + "\n")
+    elif project == "crystals":
+        parts.append(CRYSTALS_CFG_HINT + "\n")
     parts.append("-- Generated package.preload modules + entrypoint.\n\n")
+
+    if embed_cfg_path is not None and embed_cfg_path.is_file():
+        parts.append(wrap_cfg_embed(read_text(embed_cfg_path)))
 
     for name, path in modules.items():
         src = read_text(path)
@@ -171,9 +212,22 @@ def main(argv: list[str] | None = None) -> int:
 
     entry_src = read_text(entry_path)
     modules = topo_modules(entry, entry_src, project_dir, shared_dir)
-    bundle = build_bundle(project, entry, modules, entry_src)
 
-    out_name = "ae2_feed" if project == "ae2_feed" and entry == "main" else entry
+    embed_cfg_path = None
+    cfg_name = EMBED_CFG.get(project)
+    if cfg_name:
+        candidate = project_dir / cfg_name
+        if candidate.is_file():
+            embed_cfg_path = candidate
+
+    bundle = build_bundle(project, entry, modules, entry_src, embed_cfg_path)
+
+    if project == "ae2_feed" and entry == "main":
+        out_name = "ae2_feed"
+    elif project == "crystals" and entry == "main":
+        out_name = "crystals"
+    else:
+        out_name = entry
     out_dir = REPO_ROOT / "dist"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{out_name}.lua"
@@ -182,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     mod_list = ", ".join(modules.keys()) or "(none)"
     print(f"Wrote {out_path.relative_to(REPO_ROOT).as_posix()}")
     print(f"  modules: {mod_list}")
+    if embed_cfg_path is not None:
+        print(f"  embedded config: {embed_cfg_path.relative_to(REPO_ROOT).as_posix()}")
     return 0
 
 
