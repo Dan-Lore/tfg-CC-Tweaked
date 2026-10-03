@@ -15,24 +15,39 @@ local function getInv(name)
     return inv
 end
 
+local function itemAt(list, slot)
+    return list and list[slot] or nil
+end
+
+local function push(inv, name, fromSlot, limit, toSlot)
+    local ok, moved
+    if toSlot ~= nil then
+        ok, moved = pcall(inv.pushItems, name, fromSlot, limit, toSlot)
+    else
+        ok, moved = pcall(inv.pushItems, name, fromSlot, limit)
+    end
+    if not ok then
+        return 0
+    end
+    return tonumber(moved) or 0
+end
+
 local function aggregateGems(list)
     local byName = {}
     for _, item in pairs(list) do
-        if item and item.name then
+        if item and item.name and gems.isGem(item.name) then
             local info = gems.parse(item.name)
-            if info then
-                local cur = byName[item.name]
-                if not cur then
-                    cur = {
-                        name = item.name,
-                        material = info.material,
-                        tier = info.tier,
-                        count = 0,
-                    }
-                    byName[item.name] = cur
-                end
-                cur.count = cur.count + (item.count or 0)
+            local cur = byName[item.name]
+            if not cur then
+                cur = {
+                    name = item.name,
+                    material = info.material,
+                    tier = info.tier,
+                    count = 0,
+                }
+                byName[item.name] = cur
             end
+            cur.count = cur.count + (item.count or 0)
         end
     end
     return byName
@@ -50,7 +65,6 @@ local function materialOrder(byName)
     return mats
 end
 
---- Per material, tiers 1..5: even stacks, then a single leftover.
 local function buildPlan(byName, maxStack)
     maxStack = maxStack or 64
     local evenCap = maxStack - (maxStack % 2)
@@ -87,11 +101,6 @@ local function buildPlan(byName, maxStack)
     return plan
 end
 
-local function itemAt(list, slot)
-    return list and list[slot] or nil
-end
-
---- True only if slots 1..#plan match exactly and no gems sit past the plan.
 local function layoutMatches(list, plan, size)
     for i = 1, #plan do
         local item = itemAt(list, i)
@@ -118,9 +127,19 @@ local function findFree(list, size, avoid)
     return nil
 end
 
---- Source of itemName in slots after `afterSlot` (do not steal finalized low slots).
-local function findSourceAfter(list, size, itemName, afterSlot)
-    for slot = afterSlot + 1, size do
+local function findLowestGem(list, size, maxSlot)
+    maxSlot = maxSlot or size
+    for slot = 1, maxSlot do
+        local item = itemAt(list, slot)
+        if item and gems.isGem(item.name) then
+            return slot, item
+        end
+    end
+    return nil
+end
+
+local function findSource(list, size, itemName, minSlot)
+    for slot = minSlot, size do
         local item = itemAt(list, slot)
         if item and item.name == itemName and (item.count or 0) > 0 then
             return slot
@@ -129,22 +148,126 @@ local function findSourceAfter(list, size, itemName, afterSlot)
     return nil
 end
 
-local function push(inv, name, fromSlot, limit, toSlot)
-    local moved = inv.pushItems(name, fromSlot, limit, toSlot)
-    return tonumber(moved) or 0
+--- Park every gem into the highest free slots so low slots are clear for the plan.
+local function parkGemsHigh(inv, name, size)
+    local moved = false
+    local guard = 0
+    while guard < size * 2 do
+        guard = guard + 1
+        local list = inv.list() or {}
+        local free = findFree(list, size, nil)
+        if not free then
+            break
+        end
+        -- Only park gems that sit below the free slot (otherwise already high enough).
+        local src = findLowestGem(list, size, free - 1)
+        if not src then
+            break
+        end
+        local item = itemAt(list, src)
+        if push(inv, name, src, item.count, free) > 0 then
+            moved = true
+        else
+            break
+        end
+        sleep(0)
+    end
+    return moved
 end
 
---- Move whatever is in `from` into any free slot (prefer high). Returns dest or nil.
-local function evacuate(inv, name, list, size, from)
-    local item = itemAt(list, from)
-    if not item then
+local function placePlan(inv, name, size, plan)
+    local moved = false
+    for dest = 1, #plan do
+        local want = plan[dest]
+        local guard = 0
+        while guard < 48 do
+            guard = guard + 1
+            local list = inv.list() or {}
+            local cur = itemAt(list, dest)
+
+            if cur and cur.name == want.name and (cur.count or 0) == want.count then
+                break
+            end
+
+            if cur and cur.name == want.name and (cur.count or 0) > want.count then
+                local free = findFree(list, size, dest)
+                if not free then
+                    return moved, false
+                end
+                if push(inv, name, dest, cur.count - want.count, free) <= 0 then
+                    return moved, false
+                end
+                moved = true
+                sleep(0)
+            elseif cur then
+                local free = findFree(list, size, dest)
+                if not free then
+                    return moved, false
+                end
+                if push(inv, name, dest, cur.count, free) <= 0 then
+                    return moved, false
+                end
+                moved = true
+                sleep(0)
+            else
+                local need = want.count
+                local src = findSource(inv.list() or {}, size, want.name, dest + 1)
+                if not src then
+                    break
+                end
+                local got = push(inv, name, src, need, dest)
+                if got <= 0 then
+                    -- Fallback: untarged push then hope it lands / retry targeted later.
+                    got = push(inv, name, src, need, nil)
+                    if got <= 0 then
+                        break
+                    end
+                end
+                moved = true
+                sleep(0)
+            end
+        end
+        if dest % 4 == 0 then
+            sleep(0)
+        end
+    end
+    return moved, true
+end
+
+--- Try to free one slot by merging identical partial stacks.
+local function tryFreeSlot(inv, name, size, maxStack)
+    local list = inv.list() or {}
+    if findFree(list, size, nil) then
         return true
     end
-    local free = findFree(list, size, from)
-    if not free then
-        return false
+    for a = 1, size do
+        list = inv.list() or {}
+        local ia = itemAt(list, a)
+        if ia and gems.isGem(ia.name) and ia.count < maxStack then
+            for b = a + 1, size do
+                list = inv.list() or {}
+                local ib = itemAt(list, b)
+                if ib and ib.name == ia.name then
+                    if push(inv, name, b, ib.count, a) > 0 then
+                        sleep(0)
+                        list = inv.list() or {}
+                        if findFree(list, size, nil) then
+                            return true
+                        end
+                        ia = itemAt(list, a)
+                        if not ia or ia.count >= maxStack then
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        if a % 8 == 0 then
+            sleep(0)
+        end
     end
-    return push(inv, name, from, item.count, free) > 0
+    list = inv.list() or {}
+    return findFree(list, size, nil) ~= nil
 end
 
 function sort.buffer(bufferName, opts)
@@ -168,96 +291,45 @@ function sort.buffer(bufferName, opts)
     if #plan > size then
         return false, "plan>slots"
     end
-
     if layoutMatches(list, plan, size) then
         return false, "ok"
     end
 
-    -- Need at least one empty slot to reshuffle; try merge identical gems first.
-    if not findFree(list, size, nil) then
-        for a = 1, size do
-            list = inv.list() or {}
-            local ia = itemAt(list, a)
-            if ia and gems.isGem(ia.name) and ia.count < maxStack then
-                for b = a + 1, size do
-                    list = inv.list() or {}
-                    local ib = itemAt(list, b)
-                    if ib and ib.name == ia.name then
-                        push(inv, bufferName, b, ib.count, a)
-                        sleep(0)
-                        break
-                    end
-                end
-            end
-        end
-        list = inv.list() or {}
-        if not findFree(list, size, nil) then
-            return false, "need 1 free"
-        end
+    if not tryFreeSlot(inv, bufferName, size, maxStack) then
+        return false, "chest full"
     end
 
     local movedAny = false
+    for _ = 1, 3 do
+        list = inv.list() or {}
+        plan = buildPlan(aggregateGems(list), maxStack)
+        if layoutMatches(list, plan, size) then
+            return movedAny, ("sorted %d"):format(#plan)
+        end
 
-    for dest = 1, #plan do
-        local want = plan[dest]
-        local guard = 0
-        while guard < 64 do
-            guard = guard + 1
-            list = inv.list() or {}
-            local cur = itemAt(list, dest)
+        if parkGemsHigh(inv, bufferName, size) then
+            movedAny = true
+        end
 
-            if cur and cur.name == want.name and (cur.count or 0) == want.count then
-                break -- slot done
-            end
-
-            -- Excess of the right item → split out.
-            if cur and cur.name == want.name and (cur.count or 0) > want.count then
-                local free = findFree(list, size, dest)
-                if not free then
-                    return movedAny, "need 1 free"
-                end
-                if push(inv, bufferName, dest, cur.count - want.count, free) > 0 then
-                    movedAny = true
-                else
-                    break
-                end
-                sleep(0)
-            elseif cur and (not gems.isGem(cur.name) or cur.name ~= want.name) then
-                -- Wrong occupant → park high.
-                if not evacuate(inv, bufferName, list, size, dest) then
-                    return movedAny, "need 1 free"
-                end
-                movedAny = true
-                sleep(0)
-            else
-                -- Empty or short on the right item → pull from later slots.
-                list = inv.list() or {}
-                cur = itemAt(list, dest)
-                local have = (cur and cur.name == want.name) and (cur.count or 0) or 0
-                local need = want.count - have
-                if need <= 0 then
-                    break
-                end
-                local src = findSourceAfter(inv.list() or {}, size, want.name, dest)
-                if not src then
-                    -- Should not happen if plan matches totals; stop this slot.
-                    break
-                end
-                local got = push(inv, bufferName, src, need, dest)
-                if got <= 0 then
-                    break
-                end
-                movedAny = true
-                sleep(0)
+        local moved, okSpace = placePlan(inv, bufferName, size, plan)
+        if moved then
+            movedAny = true
+        end
+        if not okSpace then
+            if not tryFreeSlot(inv, bufferName, size, maxStack) then
+                return movedAny, "chest full"
             end
         end
 
-        if dest % 3 == 0 then
-            sleep(0)
+        list = inv.list() or {}
+        if layoutMatches(list, plan, size) then
+            return true, ("sorted %d"):format(#plan)
         end
+        sleep(0)
     end
 
     list = inv.list() or {}
+    plan = buildPlan(aggregateGems(list), maxStack)
     if layoutMatches(list, plan, size) then
         return true, ("sorted %d"):format(#plan)
     end

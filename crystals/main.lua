@@ -18,16 +18,20 @@ local net = { machines = {}, buffer = nil, monitor = nil, monitorName = nil }
 local dirty = false
 local lastStatus = ""
 local lastSortAt = 0
+local lastRescanAt = -100
 local SORT_COOLDOWN = 3
+local RESCAN_COOLDOWN = 5
+local booted = false
 
 local function setStatus(msg)
     lastStatus = msg
     print("crystals: " .. msg)
 end
 
-local function rescan(reason)
+local function rescan(reason, showBoot)
     net = discover.scan(config)
     dirty = false
+    lastRescanAt = os.clock()
     if reason then
         print("crystals: rescan (" .. tostring(reason) .. ")")
     end
@@ -37,18 +41,38 @@ local function rescan(reason)
     elseif #net.machines == 0 then
         setStatus("no engravers found")
     end
-    ui.boot(net.monitor, "scanning...")
+    -- Only flash "scanning..." on the very first boot, not on every hotplug.
+    if showBoot or not booted then
+        ui.boot(net.monitor, "scanning...")
+        booted = true
+    end
 end
 
 local function ensureNet()
-    if dirty or not net.buffer or #net.machines == 0 then
-        rescan(dirty and "hotplug" or "init")
+    local now = os.clock()
+    local needScan = false
+    local reason = nil
+
+    if not net.buffer or not peripheral.isPresent(net.buffer or "") then
+        needScan = true
+        reason = "buffer"
+    elseif #net.machines == 0 then
+        needScan = true
+        reason = "machines"
+    elseif dirty and (now - lastRescanAt) >= RESCAN_COOLDOWN then
+        needScan = true
+        reason = "hotplug"
     end
+
+    if needScan then
+        rescan(reason, reason == "buffer" and not booted)
+    end
+
     if net.buffer and not peripheral.isPresent(net.buffer) then
         dirty = true
         return false
     end
-    return net.buffer ~= nil and #net.machines > 0
+    return net.buffer ~= nil
 end
 
 local function flushEvents()
@@ -69,16 +93,28 @@ local function sleepWatch(seconds)
             return false
         elseif ev == "peripheral" or ev == "peripheral_detach" then
             dirty = true
-            return true
+            -- Do not wake early into a rescan storm; finish the sleep.
         end
     end
+end
+
+local function countPairs(stock)
+    local n = 0
+    if not stock then
+        return 0
+    end
+    for _, s in pairs(stock) do
+        n = n + math.floor((s.even or 0) / 2)
+    end
+    return n
 end
 
 local function tick()
     if not ensureNet() then
         ui.draw(net.monitor, {
             status = lastStatus,
-            engravers = #(net.machines or {}),
+            engravers = 0,
+            engraverTotal = #(net.machines or {}),
             stock = {},
         })
         return false
@@ -91,8 +127,30 @@ local function tick()
 
     local didWork = (result.moved or 0) > 0
     local status = result.status
+    local pairsLeft = countPairs(result.stock)
 
-    if not didWork then
+    -- Rescan later if many engravers dropped; ignore single blips.
+    if (result.engravers or 0) == 0 and #net.machines > 0 then
+        dirty = true
+        status = "no live engravers"
+    elseif result.missing and (result.engravers or 0) < math.max(1, math.floor(#net.machines / 2)) then
+        dirty = true
+    end
+
+    if result.xferFail then
+        status = "buffer not networked"
+        setStatus(status)
+    elseif #net.machines == 0 then
+        dirty = true
+        status = "no engravers found"
+    end
+
+    local canSort = not didWork
+        and not result.xferFail
+        and pairsLeft == 0
+        and (result.engravers or 0) > 0
+
+    if canSort then
         local now = os.clock()
         if now - lastSortAt >= SORT_COOLDOWN then
             local sorted, detail = sort.buffer(net.buffer, { maxStack = config.MAX_STACK })
@@ -101,17 +159,21 @@ local function tick()
                 status = result.status
             else
                 status = detail or (sorted and "sorted" or result.status)
-                if detail and detail ~= result.status then
+                if detail and detail ~= "ok" then
                     setStatus(tostring(detail))
+                end
+                if detail == "sort partial" then
+                    lastSortAt = now - SORT_COOLDOWN
                 end
             end
         end
-    else
+    elseif didWork then
         setStatus(status)
     end
 
     ui.draw(net.monitor, {
         engravers = result.engravers,
+        engraverTotal = #(net.machines or {}),
         busy = result.busy,
         queued = result.queued,
         empty = result.empty,
@@ -126,7 +188,7 @@ end
 print(("crystals: batch=%d max_stack=%d poll=%.2fs"):format(
     config.BATCH, config.MAX_STACK, config.POLL
 ))
-rescan("start")
+rescan("start", true)
 flushEvents()
 dirty = false
 

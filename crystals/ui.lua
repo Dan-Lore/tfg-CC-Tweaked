@@ -57,21 +57,38 @@ local function stockStats(stockMap)
     return pcs, pairCount, oddNames
 end
 
---- Two cells; left keeps room for a 3-letter tag + number.
+--- Two columns with a 1-char gap so "gem 159" + "fls 62" never merge.
 local function dual(mon, y, left, right, w, color)
-    local minLeft = math.min(w - 1, math.max(#tostring(left), 7))
-    local mid = math.max(math.floor(w / 2), minLeft + 1)
-    if mid >= w then
-        mid = w - 1
+    local gap = 1
+    local inner = w - gap
+    if inner < 2 then
+        writeAt(mon, 1, y, left, color, w)
+        return
     end
-    local leftW = mid - 1
-    local rightW = w - mid
+    local leftW = math.floor(inner / 2)
+    local rightW = inner - leftW
     writeAt(mon, 1, y, pad(left, leftW), color, leftW)
-    writeAt(mon, mid + 1, y, pad(right, rightW), color, rightW)
+    writeAt(mon, leftW + gap + 1, y, pad(right, rightW), color, rightW)
 end
 
-local function cell(tag3, n)
-    return tag3 .. " " .. tostring(n or 0)
+--- Compact "tag N" that fits half-width (~6-7 chars on 1x1 @0.5).
+local function cell(tag, n, maxW)
+    maxW = maxW or 7
+    n = tonumber(n) or 0
+    local s = tostring(n)
+    local room = maxW - #tag - 1
+    if room < 1 then
+        return clip(tag, maxW)
+    end
+    if #s > room then
+        if n >= 1000 and room >= 3 then
+            s = string.format("%dk", math.floor(n / 1000 + 0.5))
+        end
+        if #s > room then
+            s = s:sub(1, room)
+        end
+    end
+    return tag .. " " .. s
 end
 
 function ui.draw(mon, state)
@@ -83,23 +100,29 @@ function ui.draw(mon, state)
     local w, h = mon.getSize()
     mon.clear()
 
-    local eng = state.engravers or 0
+    local live = state.engravers or 0
+    local total = state.engraverTotal or live
     local busy = state.busy or 0
     local empty = state.empty or 0
     local pcs, pairCount, oddNames = stockStats(state.stock)
+    local colW = math.max(4, math.floor((w - 1) / 2))
 
     writeAt(mon, 1, 1, "CRYSTALS", colors.cyan, w)
-    local engStr = tostring(eng)
+    local engStr
+    if total > 0 and live ~= total then
+        engStr = live .. "/" .. total
+    else
+        engStr = tostring(live)
+    end
     writeAt(mon, math.max(1, w - #engStr + 1), 1, engStr, colors.white, #engStr)
-    writeAt(mon, 1, 2, ("busy %d  free %d"):format(busy, empty), colors.white, w)
+    writeAt(mon, 1, 2, ("busy %d free %d"):format(busy, empty), colors.white, w)
 
     writeAt(mon, 1, 3, "buffer pcs", colors.yellow, w)
-    -- grouping: chipped|flawed, gem|flawless
-    dual(mon, 4, cell("chi", pcs[1]), cell("flw", pcs[2]), w, colors.white)
-    dual(mon, 5, cell("gem", pcs[3]), cell("fls", pcs[4]), w, colors.white)
+    dual(mon, 4, cell("chi", pcs[1], colW), cell("flw", pcs[2], colW), w, colors.white)
+    dual(mon, 5, cell("gem", pcs[3], colW), cell("fls", pcs[4], colW), w, colors.white)
 
     local pairColor = pairCount > 0 and colors.lime or colors.lightGray
-    dual(mon, 6, "pairs " .. pairCount, "solo " .. oddNames, w, pairColor)
+    dual(mon, 6, cell("pr", pairCount, colW), cell("so", oddNames, colW), w, pairColor)
 
     local status = tostring(state.status or "-")
     local sc = colors.white
@@ -107,14 +130,13 @@ function ui.draw(mon, state)
         sc = colors.lime
     elseif status:find("sort", 1, true) then
         sc = colors.yellow
-    elseif status:find("wait", 1, true) or status:find("idle", 1, true) then
+    elseif status:find("no live", 1, true) or status:find("no engraver", 1, true) then
+        sc = colors.red
+    elseif status:find("wait", 1, true) or status:find("idle", 1, true) or status:find("full", 1, true) then
         sc = colors.lightGray
     end
     if h >= 7 then
         writeAt(mon, 1, 7, status, sc, w)
-    end
-    if h >= 8 and state.detail then
-        writeAt(mon, 1, 8, state.detail, colors.lightGray, w)
     end
 end
 

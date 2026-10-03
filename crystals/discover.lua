@@ -25,6 +25,14 @@ local LOCAL_SIDES = {
     back = true,
 }
 
+local BUFFER_NEEDLES = {
+    "crate",
+    "chest",
+    "barrel",
+    "drawer",
+    "shulker",
+}
+
 local function peripheralTypes(name)
     local ok, ptype = pcall(peripheral.getType, name)
     if not ok or not ptype then
@@ -123,6 +131,33 @@ local function resolveName(preferred, label)
     return nil
 end
 
+local function isLocalSide(name)
+    return name and LOCAL_SIDES[tostring(name):lower()] == true
+end
+
+--- Network inventories that can pushItems to modem-connected engravers.
+local function findNetworkBuffers(machineSet)
+    machineSet = machineSet or {}
+    local list = {}
+    local names = peripheral.getNames()
+    for i = 1, #names do
+        local name = names[i]
+        if not machineSet[name] and not isLocalSide(name) then
+            local types = peripheralTypes(name)
+            if not shouldSkip(name, types) and isInventory(name)
+                and matchesAny(name, types, BUFFER_NEEDLES)
+            then
+                list[#list + 1] = name
+            end
+        end
+        if i % 8 == 0 then
+            sleep(0)
+        end
+    end
+    table.sort(list)
+    return list
+end
+
 --- Find monitor: preferred side/name, else first monitor peripheral.
 function discover.monitor(preferred)
     local name = resolveName(preferred, "monitor")
@@ -143,16 +178,50 @@ function discover.monitor(preferred)
     return nil, nil
 end
 
---- Buffer inventory: preferred side/name, else first non-machine inventory on sides.
+--- Buffer: explicit network name > networked crate/chest > local side (last resort).
+-- Local sides often cannot pushItems to modem engravers.
 function discover.buffer(preferred, machineSet)
     machineSet = machineSet or {}
-    local name = resolveName(preferred, "buffer")
-    if name and isInventory(name) and not machineSet[name] then
-        return name
+
+    -- Explicit networked peripheral name (not a side).
+    if preferred and not isLocalSide(preferred) then
+        local name = resolveName(preferred, "buffer")
+        if name and isInventory(name) and not machineSet[name] then
+            return name
+        end
     end
-    -- Prefer local sides (top/chest attached to computer).
+
+    local netBufs = findNetworkBuffers(machineSet)
+    if #netBufs == 1 then
+        if preferred and isLocalSide(preferred) then
+            print("crystals: using networked buffer " .. netBufs[1]
+                .. " (local " .. preferred .. " cannot reach modem engravers)")
+        end
+        return netBufs[1]
+    end
+    if #netBufs > 1 then
+        local pick = netBufs[1]
+        for i = 1, #netBufs do
+            local n = netBufs[i]:lower()
+            if n:find("tungsten", 1, true) or n:find("stainless", 1, true) then
+                pick = netBufs[i]
+                break
+            end
+        end
+        print("crystals: multiple buffers, using " .. pick)
+        return pick
+    end
+
+    -- Local side fallback.
+    if preferred and isLocalSide(preferred) and isInventory(preferred) and not machineSet[preferred] then
+        print("crystals: warning: buffer " .. preferred
+            .. " is local-only; put a modem on the crate")
+        return preferred
+    end
     for _, side in ipairs({ "top", "bottom", "front", "back", "left", "right" }) do
         if isInventory(side) and not machineSet[side] then
+            print("crystals: warning: buffer " .. side
+                .. " is local-only; put a modem on the crate")
             return side
         end
     end

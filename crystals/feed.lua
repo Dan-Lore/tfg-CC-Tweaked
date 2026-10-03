@@ -178,31 +178,51 @@ local function bestMachine(machines, itemName, maxStack, bufferCount)
     return best, bestWant
 end
 
---- Push up to `limit` of itemName from buffer into machine (any matching source slots).
+--- Push up to `limit` of itemName from buffer into machine.
+-- Returns: moved (number), err (nil | "missing" | "xfer")
 local function pushFromBuffer(bufferName, machineName, itemName, limit)
     if limit <= 0 then
-        return 0
+        return 0, nil
+    end
+    if not peripheral.isPresent(machineName) then
+        return 0, "missing"
+    end
+    if not peripheral.isPresent(bufferName) then
+        return 0, "xfer"
     end
     local source = peripheral.wrap(bufferName)
     if not source or not source.list or not source.pushItems then
-        return 0
+        return 0, "xfer"
     end
     local movedTotal = 0
-    local list = source.list()
-    if not list then
-        return 0
+    local okList, list = pcall(source.list)
+    if not okList or type(list) ~= "table" then
+        return 0, "xfer"
     end
+
+    local xferFail = false
     for slot, item in pairs(list) do
         if item and item.name == itemName and movedTotal < limit then
             local need = limit - movedTotal
-            local moved = source.pushItems(machineName, slot, need) or 0
-            movedTotal = movedTotal + moved
+            local ok, moved = pcall(source.pushItems, machineName, slot, need)
+            if not ok then
+                if not peripheral.isPresent(machineName) then
+                    return movedTotal, "missing"
+                end
+                -- Do not pullItems from the engraver (outputs auto-eject to the buffer).
+                xferFail = true
+                break
+            end
+            movedTotal = movedTotal + (tonumber(moved) or 0)
             if movedTotal >= limit then
                 break
             end
         end
     end
-    return movedTotal
+    if movedTotal == 0 and xferFail then
+        return 0, "xfer"
+    end
+    return movedTotal, nil
 end
 
 --- Priority: more even stock first, then lower tier (cascade upward), then name.
@@ -233,19 +253,25 @@ function feed.tick(bufferName, machineNames, opts)
 
     local machines = {}
     local busy, queued, empty, oddFix = 0, 0, 0, 0
+    local missing = false
     for i = 1, #machineNames do
-        local m = feed.inspectMachine(machineNames[i], maxStack)
-        machines[#machines + 1] = m
-        if m.gemSlots == 0 then
-            empty = empty + 1
-        elseif m.gemSlots >= INPUT_SLOTS then
-            busy = busy + 1
+        local mName = machineNames[i]
+        if not peripheral.isPresent(mName) then
+            missing = true
         else
-            queued = queued + 1 -- 1 stack → room for a second type
-        end
-        for _, st in ipairs(m.stacks) do
-            if st.count % 2 == 1 then
-                oddFix = oddFix + 1
+            local m = feed.inspectMachine(mName, maxStack)
+            machines[#machines + 1] = m
+            if m.gemSlots == 0 then
+                empty = empty + 1
+            elseif m.gemSlots >= INPUT_SLOTS then
+                busy = busy + 1
+            else
+                queued = queued + 1
+            end
+            for _, st in ipairs(m.stacks) do
+                if st.count % 2 == 1 then
+                    oddFix = oddFix + 1
+                end
             end
         end
     end
@@ -269,17 +295,20 @@ function feed.tick(bufferName, machineNames, opts)
             queued = queued,
             empty = empty,
             oddFix = oddFix,
-            engravers = #machineNames,
+            engravers = #machines,
+            missing = missing,
         }
     end
 
     local movedTotal = 0
     local fedOps = 0
     local lastItem = nil
+    local xferFail = false
 
-    -- Keep pushing while any stock has pairs and any machine has room.
+    -- Cap work per tick so the monitor can redraw live between bursts.
+    local maxOps = math.max(8, #machines)
     local guard = 0
-    while guard < 512 do
+    while guard < maxOps do
         guard = guard + 1
         local progressed = false
 
@@ -289,8 +318,20 @@ function feed.tick(bufferName, machineNames, opts)
             if available >= 1 then
                 local m, want = bestMachine(machines, s.name, maxStack, available)
                 if m and want and want > 0 then
-                    local moved = pushFromBuffer(bufferName, m.name, s.name, want)
-                    if moved > 0 then
+                    local moved, err = pushFromBuffer(bufferName, m.name, s.name, want)
+                    if err == "missing" then
+                        missing = true
+                        for mi = #machines, 1, -1 do
+                            if machines[mi].name == m.name then
+                                table.remove(machines, mi)
+                                break
+                            end
+                        end
+                        progressed = true
+                    elseif err == "xfer" then
+                        xferFail = true
+                        break
+                    elseif moved > 0 then
                         movedTotal = movedTotal + moved
                         fedOps = fedOps + 1
                         lastItem = s.name
@@ -312,29 +353,43 @@ function feed.tick(bufferName, machineNames, opts)
                     end
                 end
             end
+            if xferFail then
+                break
+            end
         end
 
-        if not progressed then
+        if xferFail or not progressed then
             break
         end
     end
 
-    -- Recompute occupancy after feeds.
     busy, queued, empty = 0, 0, 0
-    for i = 1, #machineNames do
-        local m = feed.inspectMachine(machineNames[i], maxStack)
-        if m.gemSlots == 0 then
-            empty = empty + 1
-        elseif m.gemSlots >= INPUT_SLOTS then
-            busy = busy + 1
+    for i = 1, #machines do
+        local m = machines[i]
+        if peripheral.isPresent(m.name) then
+            m = feed.inspectMachine(m.name, maxStack)
+            machines[i] = m
+            if m.gemSlots == 0 then
+                empty = empty + 1
+            elseif m.gemSlots >= INPUT_SLOTS then
+                busy = busy + 1
+            else
+                queued = queued + 1
+            end
         else
-            queued = queued + 1
+            missing = true
         end
     end
 
     local status
     if movedTotal > 0 then
-        status = ("fed %d (%s)"):format(movedTotal, gems.short(lastItem, 16))
+        status = ("fed %d"):format(movedTotal)
+    elseif xferFail then
+        status = "buffer not networked"
+    elseif #machines == 0 then
+        status = "no live engravers"
+    elseif missing then
+        status = "rescan engravers"
     else
         status = "wait engravers full"
     end
@@ -349,7 +404,9 @@ function feed.tick(bufferName, machineNames, opts)
         queued = queued,
         empty = empty,
         oddFix = oddFix,
-        engravers = #machineNames,
+        engravers = #machines,
+        missing = missing,
+        xferFail = xferFail,
     }
 end
 
