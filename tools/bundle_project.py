@@ -10,13 +10,15 @@ Usage:
   python tools/bundle_project.py craft pizza_maintain
 
 Resolves require("name") from <project>/ then shared/. Writes dist/<entry>.lua.
-Projects in EMBED_CFG also bake <project>/*.cfg into the bundle as cfg_embed.
+Projects in COPY_CFG also copy their .cfg next to the bundle in dist/.
+Projects in EMBED_CFG bake <project>/*.cfg into the bundle as cfg_embed.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -41,12 +43,14 @@ AE2_FEED_CFG_HINT = (
     "-- Also copy ae2_feed/ae2_feed.cfg next to this file on the computer."
 )
 CRYSTALS_CFG_HINT = (
-    "-- Self-contained: config is embedded below (EDIT CONFIG). "
-    "Optional crystals.cfg on the computer overrides it."
+    "-- Also copy crystals/crystals.cfg next to this file on the computer."
 )
 
 # Projects that embed <project>/<name>.cfg as package.preload["cfg_embed"].
-EMBED_CFG: dict[str, str] = {
+EMBED_CFG: dict[str, str] = {}
+
+# Copy <project>/<name>.cfg next to the bundle in dist/.
+COPY_CFG: dict[str, str] = {
     "crystals": "crystals.cfg",
 }
 
@@ -238,6 +242,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  modules: {mod_list}")
     if embed_cfg_path is not None:
         print(f"  embedded config: {embed_cfg_path.relative_to(REPO_ROOT).as_posix()}")
+
+    copy_name = COPY_CFG.get(project)
+    if copy_name:
+        src_cfg = project_dir / copy_name
+        if src_cfg.is_file():
+            dst_cfg = out_dir / copy_name
+            shutil.copyfile(src_cfg, dst_cfg)
+            print(f"  copied config: {dst_cfg.relative_to(REPO_ROOT).as_posix()}")
     return 0
 
 

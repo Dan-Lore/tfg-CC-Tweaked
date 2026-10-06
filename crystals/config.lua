@@ -1,4 +1,4 @@
--- Load crystals.cfg (file optional if cfg_embed is bundled).
+-- Load crystals.cfg from disk (next to the running program).
 
 local util = require("util")
 
@@ -8,11 +8,14 @@ local function empty()
     return {
         MONITOR = "left",
         BUFFER = "top",
+        OVERFLOW = nil, -- extra crates when the main buffer fills
         MACHINES = nil,
         MACHINE_SUBSTR = nil, -- filled via appendList or default in finalize
         MAX_STACK = 64,
         BATCH = 2,
         POLL = 0.5,
+        KEEP_FREE = 8, -- leave this many empty slots in the main buffer
+        ALIASES = {}, -- { { item, material, tier }, ... }
     }
 end
 
@@ -61,6 +64,14 @@ local function parseLine(cfg, line, lineNo, label)
         return
     end
 
+    if key == "overflow" or key == "extra" or key == "overflow_buffer" then
+        if #parts < 2 then
+            error(("%s line %s: overflow | peripheral"):format(label, tostring(lineNo)))
+        end
+        appendList(cfg, "OVERFLOW", parts[2])
+        return
+    end
+
     if key == "machine" or key == "machines" or key == "engraver" then
         if #parts < 2 then
             error(("%s line %s: machine | peripheral"):format(label, tostring(lineNo)))
@@ -92,6 +103,24 @@ local function parseLine(cfg, line, lineNo, label)
         return
     end
 
+    if key == "keep_free" or key == "keepfree" then
+        cfg.KEEP_FREE = tonumber(parts[2]) or cfg.KEEP_FREE
+        return
+    end
+
+    -- alias | item_id | material | tier(optional, default 3)
+    if key == "alias" or key == "gem_alias" then
+        if #parts < 3 then
+            error(("%s line %s: alias | item | material [| tier]"):format(label, tostring(lineNo)))
+        end
+        cfg.ALIASES[#cfg.ALIASES + 1] = {
+            item = parts[2],
+            material = parts[3],
+            tier = tonumber(parts[4]) or 3,
+        }
+        return
+    end
+
     error(("%s line %s: unknown key %q"):format(label, tostring(lineNo), key))
 end
 
@@ -117,6 +146,9 @@ local function finalize(cfg)
     end
     if cfg.POLL < 0 then
         cfg.POLL = 0
+    end
+    if not cfg.KEEP_FREE or cfg.KEEP_FREE < 1 then
+        cfg.KEEP_FREE = 8
     end
     return cfg
 end
@@ -148,28 +180,14 @@ local function readFileText(path)
     return table.concat(chunks, "\n")
 end
 
-local function embeddedText()
-    local ok, text = pcall(require, "cfg_embed")
-    if ok and type(text) == "string" and text ~= "" then
-        return text
-    end
-    return nil
-end
-
---- Prefer crystals.cfg on disk; else bundled cfg_embed; else built-in defaults.
+--- crystals.cfg is required next to the program (not embedded).
 function config.load(path)
     path = util.resolvePath(path, "crystals.cfg")
     local fileText = readFileText(path)
-    if fileText then
-        return parseText(fileText, path)
+    if not fileText then
+        error("Cannot open " .. path .. " (copy crystals.cfg next to crystals.lua)", 2)
     end
-
-    local emb = embeddedText()
-    if emb then
-        return parseText(emb, "cfg_embed")
-    end
-
-    return finalize(empty())
+    return parseText(fileText, path)
 end
 
 return config

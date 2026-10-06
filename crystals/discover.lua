@@ -62,11 +62,48 @@ local function shouldSkip(name, types)
 end
 
 local function isInventory(name)
-    if not peripheral.isPresent(name) then
+    if not name or not peripheral.isPresent(name) then
         return false
     end
     local inv = peripheral.wrap(name)
     return inv and type(inv.list) == "function" and type(inv.pushItems) == "function"
+end
+
+--- GT crate ids sometimes drop the underscore: tungsten_steel <-> tungstensteel
+local function nameAliases(name)
+    local out = { name }
+    if not name then
+        return out
+    end
+    local alt = name:gsub("tungsten_steel", "tungstensteel", 1)
+    if alt ~= name then
+        out[#out + 1] = alt
+    else
+        alt = name:gsub("tungstensteel", "tungsten_steel", 1)
+        if alt ~= name then
+            out[#out + 1] = alt
+        end
+    end
+    return out
+end
+
+local function resolveInventory(preferred, label, machineSet)
+    machineSet = machineSet or {}
+    if not preferred then
+        return nil
+    end
+    local aliases = nameAliases(preferred)
+    for i = 1, #aliases do
+        local name = aliases[i]
+        if isInventory(name) and not machineSet[name] then
+            if name ~= preferred then
+                print(("crystals: %s %s -> %s"):format(label, preferred, name))
+            end
+            return name
+        end
+    end
+    print(("crystals: missing %s %s"):format(label, tostring(preferred)))
+    return nil
 end
 
 local function matchesNeedle(name, types, needle)
@@ -180,18 +217,26 @@ end
 
 --- Buffer: explicit network name > networked crate/chest > local side (last resort).
 -- Local sides often cannot pushItems to modem engravers.
-function discover.buffer(preferred, machineSet)
+function discover.buffer(preferred, machineSet, skip)
     machineSet = machineSet or {}
+    skip = skip or {}
 
     -- Explicit networked peripheral name (not a side).
     if preferred and not isLocalSide(preferred) then
-        local name = resolveName(preferred, "buffer")
-        if name and isInventory(name) and not machineSet[name] then
+        local name = resolveInventory(preferred, "buffer", machineSet)
+        if name and not skip[name] then
             return name
         end
     end
 
     local netBufs = findNetworkBuffers(machineSet)
+    local filtered = {}
+    for i = 1, #netBufs do
+        if not skip[netBufs[i]] then
+            filtered[#filtered + 1] = netBufs[i]
+        end
+    end
+    netBufs = filtered
     if #netBufs == 1 then
         if preferred and isLocalSide(preferred) then
             print("crystals: using networked buffer " .. netBufs[1]
@@ -262,24 +307,68 @@ function discover.machines(cfg)
     return sortMachines(list), taken
 end
 
+function discover.overflow(cfg, machineSet, primary)
+    machineSet = machineSet or {}
+    cfg = cfg or {}
+    local names = {}
+    if type(cfg.OVERFLOW) == "table" then
+        names = cfg.OVERFLOW
+    elseif type(cfg.OVERFLOW) == "string" and cfg.OVERFLOW ~= "" then
+        names = { cfg.OVERFLOW }
+    end
+    local out = {}
+    local seen = {}
+    if primary then
+        seen[primary] = true
+    end
+    for i = 1, #names do
+        local resolved = resolveInventory(names[i], "overflow", machineSet)
+        if resolved and not seen[resolved] then
+            seen[resolved] = true
+            out[#out + 1] = resolved
+        end
+    end
+    return out
+end
+
 function discover.scan(cfg)
     local machines, machineSet = discover.machines(cfg)
-    local buffer = discover.buffer(cfg.BUFFER, machineSet)
+    local skip = {}
+    local overflowNames = {}
+    if type(cfg.OVERFLOW) == "table" then
+        overflowNames = cfg.OVERFLOW
+    elseif type(cfg.OVERFLOW) == "string" then
+        overflowNames = { cfg.OVERFLOW }
+    end
+    for i = 1, #overflowNames do
+        local aliases = nameAliases(overflowNames[i])
+        for a = 1, #aliases do
+            skip[aliases[a]] = true
+        end
+    end
+    local buffer = discover.buffer(cfg.BUFFER, machineSet, skip)
+    local overflow = discover.overflow(cfg, machineSet, buffer)
     local monitor, monitorName = discover.monitor(cfg.MONITOR)
     return {
         machines = machines,
         buffer = buffer,
+        overflow = overflow,
         monitor = monitor,
         monitorName = monitorName,
     }
 end
 
 function discover.printSummary(net)
-    print(("crystals: buffer=%s  engravers=%d  monitor=%s"):format(
+    local ov = net.overflow or {}
+    print(("crystals: buffer=%s  overflow=%d  engravers=%d  monitor=%s"):format(
         tostring(net.buffer),
+        #ov,
         #(net.machines or {}),
         tostring(net.monitorName)
     ))
+    for i = 1, #ov do
+        print("  overflow: " .. ov[i])
+    end
     local m = net.machines or {}
     local show = math.min(#m, 8)
     for i = 1, show do

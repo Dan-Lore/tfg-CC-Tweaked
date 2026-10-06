@@ -21,29 +21,36 @@ local function listInv(name)
     return inv, list
 end
 
---- Aggregate gem stock in the buffer (even>0 only for processable tiers).
-function feed.bufferStock(bufferName)
-    local _, list = listInv(bufferName)
+--- Aggregate gem stock from one or more buffers.
+function feed.bufferStock(bufferNames)
+    if type(bufferNames) == "string" then
+        bufferNames = { bufferNames }
+    end
     local byName = {}
-    if not list then
+    if not bufferNames then
         return byName
     end
-    for _, item in pairs(list) do
-        if item and item.name then
-            local info = gems.parse(item.name)
-            if info then
-                local cur = byName[item.name]
-                if not cur then
-                    cur = {
-                        name = item.name,
-                        material = info.material,
-                        tier = info.tier,
-                        processable = info.processable,
-                        count = 0,
-                    }
-                    byName[item.name] = cur
+    for bi = 1, #bufferNames do
+        local _, list = listInv(bufferNames[bi])
+        if list then
+            for _, item in pairs(list) do
+                if item and item.name then
+                    local info = gems.parse(item.name)
+                    if info then
+                        local cur = byName[item.name]
+                        if not cur then
+                            cur = {
+                                name = item.name,
+                                material = info.material,
+                                tier = info.tier,
+                                processable = info.processable,
+                                count = 0,
+                            }
+                            byName[item.name] = cur
+                        end
+                        cur.count = cur.count + (item.count or 0)
+                    end
                 end
-                cur.count = cur.count + (item.count or 0)
             end
         end
     end
@@ -178,51 +185,68 @@ local function bestMachine(machines, itemName, maxStack, bufferCount)
     return best, bestWant
 end
 
---- Push up to `limit` of itemName from buffer into machine.
+--- Push up to `limit` of itemName from buffers (primary first) into machine.
 -- Returns: moved (number), err (nil | "missing" | "xfer")
-local function pushFromBuffer(bufferName, machineName, itemName, limit)
+local function pushFromBuffer(bufferNames, machineName, itemName, limit)
+    if type(bufferNames) == "string" then
+        bufferNames = { bufferNames }
+    end
     if limit <= 0 then
         return 0, nil
     end
     if not peripheral.isPresent(machineName) then
         return 0, "missing"
     end
-    if not peripheral.isPresent(bufferName) then
-        return 0, "xfer"
-    end
-    local source = peripheral.wrap(bufferName)
-    if not source or not source.list or not source.pushItems then
-        return 0, "xfer"
-    end
-    local movedTotal = 0
-    local okList, list = pcall(source.list)
-    if not okList or type(list) ~= "table" then
+    if not bufferNames or #bufferNames == 0 then
         return 0, "xfer"
     end
 
-    local xferFail = false
-    for slot, item in pairs(list) do
-        if item and item.name == itemName and movedTotal < limit then
-            local need = limit - movedTotal
-            local ok, moved = pcall(source.pushItems, machineName, slot, need)
-            if not ok then
-                if not peripheral.isPresent(machineName) then
-                    return movedTotal, "missing"
+    local movedTotal = 0
+    local anyPresent = false
+    local allXferFail = true
+
+    for bi = 1, #bufferNames do
+        local bufferName = bufferNames[bi]
+        if peripheral.isPresent(bufferName) then
+            anyPresent = true
+            local source = peripheral.wrap(bufferName)
+            if source and source.list and source.pushItems then
+                local okList, list = pcall(source.list)
+                if okList and type(list) == "table" then
+                    local crateFail = false
+                    for slot, item in pairs(list) do
+                        if item and item.name == itemName and movedTotal < limit then
+                            local need = limit - movedTotal
+                            local ok, moved = pcall(source.pushItems, machineName, slot, need)
+                            if not ok then
+                                if not peripheral.isPresent(machineName) then
+                                    return movedTotal, "missing"
+                                end
+                                crateFail = true
+                                break
+                            end
+                            allXferFail = false
+                            movedTotal = movedTotal + (tonumber(moved) or 0)
+                            if movedTotal >= limit then
+                                return movedTotal, nil
+                            end
+                        end
+                    end
+                    if not crateFail then
+                        allXferFail = false
+                    end
                 end
-                -- Do not pullItems from the engraver (outputs auto-eject to the buffer).
-                xferFail = true
-                break
-            end
-            movedTotal = movedTotal + (tonumber(moved) or 0)
-            if movedTotal >= limit then
-                break
             end
         end
     end
-    if movedTotal == 0 and xferFail then
+
+    if movedTotal > 0 then
+        return movedTotal, nil
+    end
+    if not anyPresent or allXferFail then
         return 0, "xfer"
     end
-    return movedTotal, nil
+    return 0, nil
 end
 
 --- Priority: more even stock first, then lower tier (cascade upward), then name.
@@ -237,12 +261,15 @@ local function stockPriority(a, b)
 end
 
 --- One feed pass. Returns { moved, fed, status, stock, machineStats }.
-function feed.tick(bufferName, machineNames, opts)
+function feed.tick(bufferNames, machineNames, opts)
     opts = opts or {}
     local maxStack = opts.maxStack or 64
     local batch = opts.batch or 2
+    if type(bufferNames) == "string" then
+        bufferNames = { bufferNames }
+    end
 
-    local stockMap = feed.bufferStock(bufferName)
+    local stockMap = feed.bufferStock(bufferNames)
     local stockList = {}
     for _, s in pairs(stockMap) do
         if s.processable and (s.count or 0) >= 1 then
@@ -318,7 +345,7 @@ function feed.tick(bufferName, machineNames, opts)
             if available >= 1 then
                 local m, want = bestMachine(machines, s.name, maxStack, available)
                 if m and want and want > 0 then
-                    local moved, err = pushFromBuffer(bufferName, m.name, s.name, want)
+                    local moved, err = pushFromBuffer(bufferNames, m.name, s.name, want)
                     if err == "missing" then
                         missing = true
                         for mi = #machines, 1, -1 do

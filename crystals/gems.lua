@@ -19,6 +19,25 @@ gems.TIER_NAME = {
 
 gems.MAX_PROCESS_TIER = gems.TIER_FLAWLESS -- exquisite is sink / leaves buffer
 
+-- GT maps these vanilla items as the normal (tier-3) gem for the material.
+-- Quality variants stay gtceu:chipped_<mat>_gem / flawless_<mat>_gem / …
+local VANILLA_GEMS = {
+    ["minecraft:diamond"] = { material = "diamond", tier = 3 },
+    ["minecraft:emerald"] = { material = "emerald", tier = 3 },
+    ["minecraft:lapis_lazuli"] = { material = "lapis", tier = 3 },
+    ["minecraft:quartz"] = { material = "nether_quartz", tier = 3 },
+    ["minecraft:amethyst_shard"] = { material = "amethyst", tier = 3 },
+    ["minecraft:echo_shard"] = { material = "echo_shard", tier = 3 },
+    ["minecraft:coal"] = { material = "coal", tier = 3 },
+}
+
+-- Extra crystals common in TFG that should ride the same pipeline / sort.
+local EXTRA_GEMS = {
+    ["ae2:certus_quartz_crystal"] = { material = "certus_quartz", tier = 3 },
+    ["ae2:charged_certus_quartz_crystal"] = { material = "certus_quartz", tier = 3 },
+    ["ae2:fluix_crystal"] = { material = "fluix", tier = 3 },
+}
+
 local PATTERNS = {
     { tier = 1, re = "^gtceu:chipped_(.+)_gem$" },
     { tier = 2, re = "^gtceu:flawed_(.+)_gem$" },
@@ -27,21 +46,42 @@ local PATTERNS = {
     { tier = 3, re = "^gtceu:(.+)_gem$" },
 }
 
+local function makeInfo(itemName, material, tier)
+    return {
+        name = itemName,
+        material = material,
+        tier = tier,
+        processable = tier <= gems.MAX_PROCESS_TIER,
+    }
+end
+
+--- Optional runtime aliases from config: gems.addAlias(itemId, material, tier)
+local runtimeAliases = {}
+
+function gems.addAlias(itemName, material, tier)
+    if not itemName or not material then
+        return
+    end
+    tier = tonumber(tier) or gems.TIER_GEM
+    runtimeAliases[itemName] = { material = material, tier = tier }
+end
+
 --- @return { name, material, tier, processable } | nil
 function gems.parse(itemName)
     if not itemName or type(itemName) ~= "string" then
         return nil
     end
+
+    local alias = runtimeAliases[itemName] or VANILLA_GEMS[itemName] or EXTRA_GEMS[itemName]
+    if alias then
+        return makeInfo(itemName, alias.material, alias.tier)
+    end
+
     for i = 1, #PATTERNS do
         local p = PATTERNS[i]
         local mat = itemName:match(p.re)
         if mat then
-            return {
-                name = itemName,
-                material = mat,
-                tier = p.tier,
-                processable = p.tier <= gems.MAX_PROCESS_TIER,
-            }
+            return makeInfo(itemName, mat, p.tier)
         end
     end
     return nil
@@ -85,7 +125,6 @@ function gems.evenRoom(current, maxStack)
         return 0
     end
     if current % 2 == 1 then
-        -- Fix odd stall first, then fill with pairs.
         local rest = room - 1
         return 1 + (rest - (rest % 2))
     end

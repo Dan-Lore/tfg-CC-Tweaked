@@ -339,4 +339,93 @@ function sort.buffer(bufferName, opts)
     return false, "sort failed"
 end
 
+local function occupiedCount(list, size)
+    local n = 0
+    for slot = 1, size do
+        if itemAt(list, slot) then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+--- CC-only overflow: push bulk even gem stacks from main until keepFree empty slots remain.
+function sort.spillTo(fromName, overflowNames, opts)
+    opts = opts or {}
+    local keepFree = tonumber(opts.keepFree) or 8
+    local maxMoves = tonumber(opts.maxMoves) or 16
+    if type(overflowNames) == "string" then
+        overflowNames = { overflowNames }
+    end
+    if not overflowNames or #overflowNames == 0 then
+        return 0, "no overflow"
+    end
+
+    local inv = getInv(fromName)
+    if not inv then
+        return 0, "no buffer"
+    end
+    local size = inv.size()
+    if not size or size < 1 then
+        return 0, "bad size"
+    end
+
+    local list = inv.list() or {}
+    local free = size - occupiedCount(list, size)
+    if free >= keepFree then
+        return 0, "ok"
+    end
+
+    local need = keepFree - free
+    local movedTotal = 0
+    local ops = 0
+
+    while need > 0 and ops < maxMoves do
+        ops = ops + 1
+        list = inv.list() or {}
+        local pick = nil
+        -- Prefer even bulk stacks from high slots; leave odd singles in main.
+        for slot = size, 1, -1 do
+            local item = itemAt(list, slot)
+            if item and gems.isGem(item.name) and (item.count or 0) >= 2 then
+                pick = slot
+                break
+            end
+        end
+        if not pick then
+            break
+        end
+
+        local item = itemAt(list, pick)
+        local even = (item.count or 0) - ((item.count or 0) % 2)
+        if even < 2 then
+            break
+        end
+
+        local dest = nil
+        for i = 1, #overflowNames do
+            if overflowNames[i] ~= fromName and peripheral.isPresent(overflowNames[i]) then
+                dest = overflowNames[i]
+                break
+            end
+        end
+        if not dest then
+            return movedTotal, "overflow missing"
+        end
+
+        local got = push(inv, dest, pick, even)
+        if got <= 0 then
+            return movedTotal, "overflow full"
+        end
+        movedTotal = movedTotal + got
+        need = need - 1
+        sleep(0)
+    end
+
+    if movedTotal > 0 then
+        return movedTotal, ("spill %d"):format(movedTotal)
+    end
+    return 0, "ok"
+end
+
 return sort

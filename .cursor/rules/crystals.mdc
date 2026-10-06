@@ -11,7 +11,8 @@ CC: Tweaked script for TerraFirmaGreg. Upgrades GTCEu gems in a buffer chest thr
 ## Layout
 
 - Monitor: left (1 block)
-- Buffer chest: top
+- Main buffer: networked crate (`buffer` in cfg)
+- Overflow crate: `overflow | gtceu:tungsten_steel_crate_1` — **CC-only writes** (spill from main when it fills)
 - Engravers: wired network (`gtceu:hv_laser_engraver_N`, ~36)
 
 ## Behaviour
@@ -20,7 +21,9 @@ CC: Tweaked script for TerraFirmaGreg. Upgrades GTCEu gems in a buffer chest thr
 - Only even counts are fed (batch 2); odd singles stay in the buffer as count=1
 - Exquisite is not fed (sink / pipes pull it); flawless is fed → exquisite
 - Each engraver has 2 input slots (≤64 each): top up same type first, then queue a second type on a busy machine, then start empty machines
-- When idle: sort buffer so same material / different tiers sit together
+- When the main buffer has fewer than `keep_free` empty slots, CC pushes even gem stacks into overflow
+- Feed from main first, then overflow
+- When idle: sort main (and overflow)
 
 ## Deploy
 
@@ -28,6 +31,4 @@ CC: Tweaked script for TerraFirmaGreg. Upgrades GTCEu gems in a buffer chest thr
 python tools/bundle_project.py crystals
 ```
 
-Copy **only** `dist/crystals.lua` onto the computer — config is embedded at the top (`EDIT CONFIG`).  
-Optional: place `crystals.cfg` next to it to override the embed without rebuilding.  
-Modular sources in `crystals/` stay as the editable project layout.
+Copy **both** `dist/crystals.lua` and `dist/crystals.cfg` onto the computer (same folder).

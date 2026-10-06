@@ -2,7 +2,7 @@
 -- Buffer on top, monitor on left, HV laser engravers on the network.
 --
 -- Bundle:  python tools/bundle_project.py crystals
--- Deploy:  dist/crystals.lua (config embedded; optional crystals.cfg overrides)
+-- Deploy:  dist/crystals.lua + crystals.cfg  (startup: shell.run("crystals"))
 
 package.path = package.path
     .. ";/crystals/?.lua;crystals/?.lua;/shared/?.lua;shared/?.lua"
@@ -12,9 +12,16 @@ local discover = require("discover")
 local feed = require("feed")
 local sort = require("sort")
 local ui = require("ui")
+local gems = require("gems")
 
 local config = configMod.load()
-local net = { machines = {}, buffer = nil, monitor = nil, monitorName = nil }
+if config.ALIASES then
+    for i = 1, #config.ALIASES do
+        local a = config.ALIASES[i]
+        gems.addAlias(a.item, a.material, a.tier)
+    end
+end
+local net = { machines = {}, buffer = nil, overflow = {}, monitor = nil, monitorName = nil }
 local dirty = false
 local lastStatus = ""
 local lastSortAt = 0
@@ -28,8 +35,25 @@ local function setStatus(msg)
     print("crystals: " .. msg)
 end
 
+local function bufferList()
+    local list = {}
+    if net.buffer then
+        list[#list + 1] = net.buffer
+    end
+    local ov = net.overflow or {}
+    for i = 1, #ov do
+        if ov[i] ~= net.buffer then
+            list[#list + 1] = ov[i]
+        end
+    end
+    return list
+end
+
 local function rescan(reason, showBoot)
     net = discover.scan(config)
+    if not net.overflow then
+        net.overflow = {}
+    end
     dirty = false
     lastRescanAt = os.clock()
     if reason then
@@ -120,7 +144,7 @@ local function tick()
         return false
     end
 
-    local result = feed.tick(net.buffer, net.machines, {
+    local result = feed.tick(bufferList(), net.machines, {
         maxStack = config.MAX_STACK,
         batch = config.BATCH,
     })
@@ -128,6 +152,24 @@ local function tick()
     local didWork = (result.moved or 0) > 0
     local status = result.status
     local pairsLeft = countPairs(result.stock)
+
+    -- Main crate is the intake; CC spills bulk even stacks into overflow to keep room.
+    local ov = net.overflow or {}
+    if #ov > 0 and not result.xferFail then
+        local spilled, spillMsg = sort.spillTo(net.buffer, ov, {
+            keepFree = config.KEEP_FREE,
+            maxMoves = 12,
+        })
+        if spilled and spilled > 0 then
+            didWork = true
+            status = spillMsg or ("spill " .. spilled)
+            setStatus(status)
+        elseif spillMsg == "overflow full" then
+            status = "overflow full"
+        elseif spillMsg == "overflow missing" then
+            dirty = true
+        end
+    end
 
     -- Rescan later if many engravers dropped; ignore single blips.
     if (result.engravers or 0) == 0 and #net.machines > 0 then
@@ -155,8 +197,27 @@ local function tick()
         if now - lastSortAt >= SORT_COOLDOWN then
             local sorted, detail = sort.buffer(net.buffer, { maxStack = config.MAX_STACK })
             lastSortAt = now
+            if detail == "ok" or detail == "chest full" then
+                -- Main may be packed; still tidy overflow crates.
+                local ov = net.overflow or {}
+                for i = 1, #ov do
+                    sort.buffer(ov[i], { maxStack = config.MAX_STACK })
+                    sleep(0)
+                end
+            end
             if detail == "ok" then
                 status = result.status
+            elseif detail == "chest full" and #(net.overflow or {}) > 0 then
+                local spilled = sort.spillTo(net.buffer, net.overflow, {
+                    keepFree = config.KEEP_FREE,
+                    maxMoves = 8,
+                })
+                if spilled and spilled > 0 then
+                    lastSortAt = now - SORT_COOLDOWN
+                    status = "spill then sort"
+                else
+                    status = "main full, using overflow"
+                end
             else
                 status = detail or (sorted and "sorted" or result.status)
                 if detail and detail ~= "ok" then
