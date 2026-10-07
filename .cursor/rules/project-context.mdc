@@ -22,7 +22,7 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - Keep craft/transfer helpers inventory-agnostic: callers pass peripheral names (`from` / `out` / `machine`), never hard-code specific storage blocks
 - Greenhouse control lives in `greenhouse.lua`; machines stay **disabled by default**
 - Grow craft: `Greenhouse.pulse` (~3s on, then off) — one recipe finishes after the pulse; then poll `mv_output_bus_N`
-- Two configs: `recipes.cfg` (machines/IO/flags) and `storage.cfg` (main/flora/overflow/sources/seeds/routes/UI timings)
+- Repo keeps `recipes.cfg` + `storage.cfg`; deploy is `<entry>.lua` + `<entry>.cfg` (bundler merges both into matching basename with `[storage]` / `[recipes]`). Local unbundled runs still accept the two separate files.
 - `greenhouse_clean.lua` is autonomous — any computer with configs + peripheral network; not tied to `craft_ui`; keeps GH off and only empties buses
 - Non-fridge items (e.g. `firmalife:spice/basil_leaves`) use `route` → `overflow` in `storage.cfg`; cleaner drains overflow first
 - Greenhouse products are pulled from `output_bus_prefix` + circuit (default `gtceu:mv_output_bus_N`), not from the greenhouse controller block

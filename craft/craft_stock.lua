@@ -96,8 +96,12 @@ function craft_stock.snapshot(store, opts, itemNames, fluidNames)
     end
 
     local function countItemNow(name)
-        local total = 0
         local sources = craft_stock.pullSourcesFor(store, name, opts)
+        -- Tags need getItemDetail (match + skip spoiled meats). Exact ids use list().
+        if transfer.isTag(name) then
+            return transfer.countFromMany(sources, name)
+        end
+        local total = 0
         for i = 1, #sources do
             local bag = scanInv(sources[i])
             total = total + (bag[name] or 0)
@@ -181,24 +185,15 @@ function craft_stock.findMissingInputs(recipe, store, opts, times)
                     fluid = true,
                 }
             end
-        elseif craft_stock.isCraftableName(input.name) then
+        else
+            -- Exact id or #tag — transfer.count handles both.
             local have = craft_stock.countAvailable(store, input.name, opts)
             if have < need then
                 items[#items + 1] = {
                     name = input.name,
                     count = need - have,
                     fluid = false,
-                }
-            end
-        else
-            local sources = craft_stock.pullSourcesFor(store, input.name, opts)
-            local have = transfer.countFromMany(sources, input.name)
-            if have < need then
-                items[#items + 1] = {
-                    name = input.name,
-                    count = need - have,
-                    fluid = false,
-                    tag = true,
+                    tag = not craft_stock.isCraftableName(input.name) or nil,
                 }
             end
         end

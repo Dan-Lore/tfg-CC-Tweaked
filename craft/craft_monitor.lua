@@ -103,6 +103,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
     local inflight = {}
     local machineCache = {}
     local skipStreak = 0
+    local planFails = 0
 
     log("index build")
     local index = craft_plan.buildIndex(list, deps.findByOutput)
@@ -196,163 +197,177 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
             inflight, preloadItems, preloadFluids, machineCache
         )
         if not tickOk then
-            log("PLAN FAIL " .. tostring(tick))
-            return false, {
-                error = "exception",
-                missing = { name = "planning: " .. tostring(tick), count = 1 },
-            }
-        end
-
-        if tick.hard then
-            hardSticky = tick.hard
-        end
-
-        -- One job per free machine, depth-first (cooked oven + raw assembler together).
-        local wave = {}
-        local claimed = {}
-        for i = 1, #tick.jobs do
-            if #wave >= MAX_PARALLEL then
-                break
+            planFails = planFails + 1
+            local err = tostring(tick)
+            log("PLAN FAIL " .. err:sub(1, 48))
+            -- Transient TLYW / peripheral blip: retry instead of aborting the whole request.
+            if planFails >= 8 then
+                return false, {
+                    error = "exception",
+                    missing = { name = "planning: " .. err, count = 1 },
+                }
             end
-            local cand = tick.jobs[i]
-            if cand.machine and not claimed[cand.machine] and not machine_lock.isBusy(cand.machine) then
-                claimed[cand.machine] = true
-                local reserved = cand.times * cand.outStack.count
-                cand.reserved = reserved
-                inflight[cand.itemId] = (inflight[cand.itemId] or 0) + reserved
-                wave[#wave + 1] = cand
-                hardSticky = nil
-            end
-        end
-
-        if #wave == 0 then
-            if hardSticky and not machine_lock.busyAny() then
-                local m = hardSticky.missing and hardSticky.missing.name
-                log("fail " .. shortName(m))
-                return false, hardSticky
-            end
-            emitActivity(opts, "waiting...")
-            if skipStreak == 0 then
-                log("wait")
-            end
-            sleep(IDLE_SLEEP)
+            sleep(0.2)
         else
-            local names = {}
-            for i = 1, #wave do
-                names[i] = shortName(wave[i].itemId)
-            end
-            log("wave " .. table.concat(names, "+"))
-            emitActivity(opts, table.concat(names, " | "))
+            planFails = 0
 
-            local slots = {}
-            local fns = {}
-            for i = 1, #wave do
-                local job = wave[i]
-                local slot = { job = job, ok = true, detail = nil, gained = 0, err = nil }
-                slots[i] = slot
-                fns[i] = function()
-                    local ran, ok, detail, gained = pcall(function()
-                        return executeJob(job)
-                    end)
-                    if not ran then
-                        slot.ok = false
-                        slot.err = tostring(ok)
-                        slot.detail = {
-                            error = "exception",
-                            missing = { name = tostring(ok), count = 1 },
-                        }
-                        slot.gained = 0
-                    else
-                        slot.ok = ok
-                        slot.detail = detail
-                        slot.gained = gained or 0
-                    end
+            if tick.hard then
+                hardSticky = tick.hard
+            end
+
+            -- One job per free machine, depth-first (cooked oven + raw assembler together).
+            local wave = {}
+            local claimed = {}
+            for i = 1, #tick.jobs do
+                if #wave >= MAX_PARALLEL then
+                    break
+                end
+                local cand = tick.jobs[i]
+                if cand.machine and not claimed[cand.machine] and not machine_lock.isBusy(cand.machine) then
+                    claimed[cand.machine] = true
+                    local reserved = cand.times * cand.outStack.count
+                    cand.reserved = reserved
+                    inflight[cand.itemId] = (inflight[cand.itemId] or 0) + reserved
+                    wave[#wave + 1] = cand
+                    hardSticky = nil
                 end
             end
 
-            local parOk, parErr = pcall(function()
-                if #fns == 1 then
-                    fns[1]()
-                else
-                    parallel.waitForAll(table.unpack(fns))
+            if #wave == 0 then
+                if hardSticky and not machine_lock.busyAny() then
+                    local m = hardSticky.missing and hardSticky.missing.name
+                    log("fail " .. shortName(m))
+                    return false, hardSticky
                 end
-            end)
-
-            -- Always release inflight reservations.
-            for i = 1, #wave do
-                local job = wave[i]
-                local reserved = job.reserved or 0
-                inflight[job.itemId] = math.max(0, (inflight[job.itemId] or 0) - reserved)
-            end
-
-            if not parOk then
-                log("PAR FAIL " .. tostring(parErr))
-                return false, {
-                    error = "exception",
-                    missing = { name = tostring(parErr), count = 1 },
-                }
-            end
-
-            local firstErr = nil
-            local anyProgress = false
-            local anySkip = false
-
-            for i = 1, #slots do
-                local slot = slots[i]
-                local job = slot.job
-                if slot.err then
-                    log("ERR " .. shortName(job.itemId) .. " " .. slot.err)
-                    firstErr = firstErr or slot.detail
-                elseif type(slot.detail) == "table" and slot.detail.skipped then
-                    anySkip = true
-                    log("skip " .. shortName(job.itemId) .. " " .. tostring(slot.detail.reason or ""))
-                elseif not slot.ok then
-                    local m = (type(slot.detail) == "table" and slot.detail.missing and slot.detail.missing.name)
-                        or (type(slot.detail) == "table" and slot.detail.error)
-                        or "fail"
-                    log("fail " .. shortName(job.itemId) .. " " .. tostring(m))
-                    firstErr = firstErr or slot.detail
-                elseif slot.gained and slot.gained > 0 then
-                    anyProgress = true
-                    log("ok +" .. tostring(slot.gained) .. " " .. shortName(job.itemId))
-                    if job.isRoot then
-                        rootCrafted = rootCrafted + slot.gained
-                        emitProgress(opts, math.min(rootWant, rootCrafted), rootWant)
-                    end
-                    logSteps[#logSteps + 1] = {
-                        item = job.itemId,
-                        machine = job.machine,
-                        flag = job.recipe.flag,
-                        detail = slot.detail,
-                        times = (type(slot.detail) == "table" and slot.detail.sets_pushed) or job.times,
-                    }
-                else
-                    anySkip = true
-                    log("noop " .. shortName(job.itemId))
+                emitActivity(opts, "waiting...")
+                if skipStreak == 0 then
+                    log("wait")
                 end
-            end
-
-            if firstErr then
-                return false, firstErr
-            end
-
-            if anyProgress then
-                skipStreak = 0
+                sleep(IDLE_SLEEP)
             else
-                skipStreak = skipStreak + 1
-                sleep(SKIP_SLEEP)
-            end
+                local names = {}
+                for i = 1, #wave do
+                    names[i] = shortName(wave[i].itemId)
+                end
+                log("wave " .. table.concat(names, "+"))
+                emitActivity(opts, table.concat(names, " | "))
 
-            if skipStreak >= 30 then
-                log("stuck skips")
-                return false, {
-                    error = "exception",
-                    missing = { name = "stuck: jobs skip without progress", count = 1 },
-                }
-            end
+                local slots = {}
+                local fns = {}
+                for i = 1, #wave do
+                    local job = wave[i]
+                    local slot = { job = job, ok = true, detail = nil, gained = 0, err = nil }
+                    slots[i] = slot
+                    fns[i] = function()
+                        local ran, ok, detail, gained = pcall(function()
+                            return executeJob(job)
+                        end)
+                        if not ran then
+                            slot.ok = false
+                            slot.err = tostring(ok)
+                            slot.detail = {
+                                error = "exception",
+                                missing = { name = tostring(ok), count = 1 },
+                            }
+                            slot.gained = 0
+                        else
+                            slot.ok = ok
+                            slot.detail = detail
+                            slot.gained = gained or 0
+                        end
+                    end
+                end
 
-            if not rootDone() then
-                emitActivity(opts, "planning...")
+                local parOk, parErr = pcall(function()
+                    if #fns == 1 then
+                        fns[1]()
+                    else
+                        parallel.waitForAll(table.unpack(fns))
+                    end
+                end)
+
+                -- Always release inflight reservations.
+                for i = 1, #wave do
+                    local job = wave[i]
+                    local reserved = job.reserved or 0
+                    inflight[job.itemId] = math.max(0, (inflight[job.itemId] or 0) - reserved)
+                end
+
+                if not parOk then
+                    log("PAR FAIL " .. tostring(parErr))
+                    return false, {
+                        error = "exception",
+                        missing = { name = tostring(parErr), count = 1 },
+                    }
+                end
+
+                local firstErr = nil
+                local anyProgress = false
+                local softFail = false
+
+                for i = 1, #slots do
+                    local slot = slots[i]
+                    local job = slot.job
+                    if slot.err then
+                        -- Worker threw (often TLYW): soft-retry, do not kill whole request.
+                        softFail = true
+                        log("ERR " .. shortName(job.itemId) .. " " .. tostring(slot.err):sub(1, 40))
+                    elseif type(slot.detail) == "table" and slot.detail.skipped then
+                        log("skip " .. shortName(job.itemId) .. " " .. tostring(slot.detail.reason or ""))
+                    elseif not slot.ok then
+                        local m = (type(slot.detail) == "table" and slot.detail.missing and slot.detail.missing.name)
+                            or (type(slot.detail) == "table" and slot.detail.error)
+                            or "fail"
+                        local msg = tostring(m)
+                        -- Lua exceptions look like "/prog.lua:123: ..."; treat as soft.
+                        if msg:find("%.lua:", 1, false) or msg:find("Too long", 1, true) then
+                            softFail = true
+                            log("ERR " .. shortName(job.itemId) .. " " .. msg:sub(1, 40))
+                        else
+                            log("fail " .. shortName(job.itemId) .. " " .. msg)
+                            firstErr = firstErr or slot.detail
+                        end
+                    elseif slot.gained and slot.gained > 0 then
+                        anyProgress = true
+                        log("ok +" .. tostring(slot.gained) .. " " .. shortName(job.itemId))
+                        if job.isRoot then
+                            rootCrafted = rootCrafted + slot.gained
+                            emitProgress(opts, math.min(rootWant, rootCrafted), rootWant)
+                        end
+                        logSteps[#logSteps + 1] = {
+                            item = job.itemId,
+                            machine = job.machine,
+                            flag = job.recipe.flag,
+                            detail = slot.detail,
+                            times = (type(slot.detail) == "table" and slot.detail.sets_pushed) or job.times,
+                        }
+                    else
+                        log("noop " .. shortName(job.itemId))
+                    end
+                end
+
+                if firstErr then
+                    return false, firstErr
+                end
+
+                if anyProgress then
+                    skipStreak = 0
+                else
+                    skipStreak = skipStreak + 1
+                    sleep(softFail and 0.15 or SKIP_SLEEP)
+                end
+
+                if skipStreak >= 30 then
+                    log("stuck skips")
+                    return false, {
+                        error = "exception",
+                        missing = { name = "stuck: jobs skip without progress", count = 1 },
+                    }
+                end
+
+                if not rootDone() then
+                    emitActivity(opts, "planning...")
+                end
             end
         end
     end

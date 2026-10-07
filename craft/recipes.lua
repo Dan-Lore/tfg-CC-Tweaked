@@ -133,28 +133,16 @@ function recipes.parseLine(line, lineNo)
     }
 end
 
+--- Load recipes. Prefers <program>.cfg [recipes], else recipes.cfg.
 function recipes.load(path)
-    path = util.resolvePath(path, "recipes.cfg")
-    local file = fs.open(path, "r")
-    if not file then
-        error("Cannot open " .. path, 2)
-    end
+    local lines = util.openConfigLines(path, "recipes", "recipes.cfg")
     local list = {}
-    local n = 0
-
-    while true do
-        local line = file.readLine()
-        if not line then
-            break
-        end
-        n = n + 1
-        local recipe = recipes.parseLine(line, n)
+    for n = 1, #lines do
+        local recipe = recipes.parseLine(lines[n], n)
         if recipe then
             list[#list + 1] = recipe
         end
     end
-
-    file.close()
     return list
 end
 

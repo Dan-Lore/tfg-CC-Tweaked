@@ -100,25 +100,13 @@ local function resolveAlias(cfg, dest)
     return dest
 end
 
---- Load storage.cfg. Returns a config table with helper methods.
+--- Load storage settings. Prefers <program>.cfg [storage], else storage.cfg.
 function storage.load(path)
-    path = util.resolvePath(path, "storage.cfg")
-    local file = fs.open(path, "r")
-    if not file then
-        error("Cannot open " .. path, 2)
-    end
-
+    local lines = util.openConfigLines(path, "storage", "storage.cfg")
     local cfg = emptyConfig()
-    local n = 0
-    while true do
-        local line = file.readLine()
-        if not line then
-            break
-        end
-        n = n + 1
-        parseLine(cfg, line, n)
+    for n = 1, #lines do
+        parseLine(cfg, lines[n], n)
     end
-    file.close()
 
     function cfg.main()
         return cfg.named.main

@@ -10,7 +10,9 @@ Usage:
   python tools/bundle_project.py craft pizza_maintain
 
 Resolves require("name") from <project>/ then shared/. Writes dist/<entry>.lua.
-Projects in COPY_CFG also copy their .cfg next to the bundle in dist/.
+COPY_CFG copies a single .cfg next to the bundle.
+MERGE_CFG merges several source .cfg files into dist/<entry>.cfg
+(e.g. craft pizza_maintain → pizza_maintain.lua + pizza_maintain.cfg).
 Projects in EMBED_CFG bake <project>/*.cfg into the bundle as cfg_embed.
 """
 
@@ -37,13 +39,14 @@ EXTRA_REQUIRES: dict[str, tuple[str, ...]] = {
 }
 
 CRAFT_CFG_HINT = (
-    "-- Also copy craft/recipes.cfg and craft/storage.cfg next to this file on the computer."
+    "-- Also copy the matching .cfg next to this file "
+    "(same basename; sections [storage] and [recipes])."
 )
 AE2_FEED_CFG_HINT = (
-    "-- Also copy ae2_feed/ae2_feed.cfg next to this file on the computer."
+    "-- Also copy ae2_feed.cfg next to this file on the computer."
 )
 CRYSTALS_CFG_HINT = (
-    "-- Also copy crystals/crystals.cfg next to this file on the computer."
+    "-- Also copy crystals.cfg next to this file on the computer."
 )
 
 # Projects that embed <project>/<name>.cfg as package.preload["cfg_embed"].
@@ -52,6 +55,13 @@ EMBED_CFG: dict[str, str] = {}
 # Copy <project>/<name>.cfg next to the bundle in dist/.
 COPY_CFG: dict[str, str] = {
     "crystals": "crystals.cfg",
+    "ae2_feed": "ae2_feed.cfg",
+}
+
+# Merge several source cfgs into one sectioned dist file named like the entry.
+# project -> (src_cfg, ...)  → dist/<entry>.cfg with [stem] sections.
+MERGE_CFG: dict[str, tuple[str, ...]] = {
+    "craft": ("storage.cfg", "recipes.cfg"),
 }
 
 
@@ -177,6 +187,29 @@ def build_bundle(
     return "".join(parts)
 
 
+def write_merged_cfg(
+    project_dir: Path,
+    out_path: Path,
+    sources: tuple[str, ...],
+    paired_lua: str,
+) -> None:
+    parts: list[str] = []
+    parts.append(
+        f"# Config for {paired_lua} (keep the same basename on the computer).\n"
+        "# Sections match source files in the repo. Edit either section in-game.\n\n"
+    )
+    for src_name in sources:
+        src_path = project_dir / src_name
+        if not src_path.is_file():
+            raise SystemExit(f"merge cfg source missing: {src_path}")
+        section = Path(src_name).stem
+        body = read_text(src_path).replace("\r\n", "\n").replace("\r", "\n").rstrip()
+        parts.append(f"[{section}]\n")
+        parts.append(body)
+        parts.append("\n\n")
+    out_path.write_text("".join(parts), encoding="utf-8", newline="\n")
+
+
 def resolve_entry(project: str, entry_arg: str | None) -> tuple[str, Path]:
     project_dir = REPO_ROOT / project
     if not project_dir.is_dir():
@@ -243,13 +276,22 @@ def main(argv: list[str] | None = None) -> int:
     if embed_cfg_path is not None:
         print(f"  embedded config: {embed_cfg_path.relative_to(REPO_ROOT).as_posix()}")
 
-    copy_name = COPY_CFG.get(project)
-    if copy_name:
-        src_cfg = project_dir / copy_name
-        if src_cfg.is_file():
-            dst_cfg = out_dir / copy_name
-            shutil.copyfile(src_cfg, dst_cfg)
-            print(f"  copied config: {dst_cfg.relative_to(REPO_ROOT).as_posix()}")
+    sources = MERGE_CFG.get(project)
+    if sources:
+        dst_cfg = out_dir / f"{out_name}.cfg"
+        write_merged_cfg(project_dir, dst_cfg, sources, f"{out_name}.lua")
+        print(
+            f"  merged config: {dst_cfg.relative_to(REPO_ROOT).as_posix()} "
+            f"<- {', '.join(sources)}"
+        )
+    else:
+        copy_name = COPY_CFG.get(project)
+        if copy_name:
+            src_cfg = project_dir / copy_name
+            if src_cfg.is_file():
+                dst_cfg = out_dir / copy_name
+                shutil.copyfile(src_cfg, dst_cfg)
+                print(f"  copied config: {dst_cfg.relative_to(REPO_ROOT).as_posix()}")
     return 0
 
 

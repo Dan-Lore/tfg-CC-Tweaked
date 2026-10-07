@@ -58,7 +58,8 @@ function craft_plan.buildIndex(list, findByOutput)
         local recipe = entry.recipe
         for i = 1, #recipe.inputs do
             local input = recipe.inputs[i]
-            if not input.fluid and craft_stock.isCraftableName(input.name) and byOutput[input.name] then
+            -- Recurse into producers for concrete items and item-tags alike.
+            if not input.fluid and byOutput[input.name] then
                 local d = depthOf(input.name)
                 if d > maxChild then
                     maxChild = d
@@ -124,7 +125,7 @@ function craft_plan.collectNames(index, rootItemId)
                 addFluid(input.name)
             else
                 addItem(input.name)
-                if craft_stock.isCraftableName(input.name) and index.byOutput[input.name] then
+                if index.byOutput[input.name] then
                     walk(input.name)
                 end
             end
@@ -199,7 +200,6 @@ function craft_plan.computeDemand(index, rootItemId, rootStill, snap, inflight)
                         },
                     }
                 elseif haveF < input.count then
-                    -- Only hard-fail when not even one set can run.
                     hard = hard or {
                         error = "missing_input",
                         missing = {
@@ -209,23 +209,23 @@ function craft_plan.computeDemand(index, rootItemId, rootStill, snap, inflight)
                         },
                     }
                 end
+            elseif index.byOutput[input.name] then
+                -- Concrete item or item-tag with a producing recipe (e.g. cook any meat).
+                consider(input.name, needAmt)
             elseif craft_stock.isCraftableName(input.name) then
-                if index.byOutput[input.name] then
-                    consider(input.name, needAmt)
-                else
-                    local haveI = snap.item(input.name)
-                    if haveI < input.count then
-                        hard = hard or {
-                            error = "missing_input",
-                            missing = {
-                                name = input.name,
-                                count = input.count - haveI,
-                                fluid = false,
-                            },
-                        }
-                    end
+                local haveI = snap.item(input.name)
+                if haveI < input.count then
+                    hard = hard or {
+                        error = "missing_input",
+                        missing = {
+                            name = input.name,
+                            count = input.count - haveI,
+                            fluid = false,
+                        },
+                    }
                 end
             else
+                -- Tag with no producer: must already be in storage.
                 local haveI = snap.item(input.name)
                 if haveI < input.count then
                     hard = hard or {

@@ -1,9 +1,9 @@
 -- Autonomous greenhouse output sorter.
--- Requires on this computer: storage.cfg, recipes.cfg, and the lua modules below.
+-- Requires on this computer: greenhouse_clean.cfg (or storage.cfg + recipes.cfg).
 -- Works on any computer attached to the same peripheral network.
 --
 -- Bundle:  python tools/bundle_project.py craft greenhouse_clean
--- Deploy:  dist/greenhouse_clean.lua + recipes.cfg + storage.cfg
+-- Deploy:  dist/greenhouse_clean.lua + greenhouse_clean.cfg
 
 package.path = package.path
     .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"

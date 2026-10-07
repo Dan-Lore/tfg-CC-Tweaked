@@ -10,7 +10,6 @@ local machine_lock = require("machine_lock")
 
 local craft = {}
 
-local DEFAULT_CFG = "recipes.cfg"
 local DEFAULT_CRAFT_WAIT = 300
 
 craft.resolveMachine = peripherals.resolveMachine
@@ -21,15 +20,17 @@ craft.tryMachineLock = machine_lock.tryLock
 -- Recipe helpers
 ---------------------------------------------------------------------------
 
+--- Load processing/craft recipes. path nil → <program>.cfg [recipes] / recipes.cfg
 function craft.load(path)
-    local all = recipes.load(path or DEFAULT_CFG)
+    local all = recipes.load(path)
     return recipes.filter(all, function(r)
         return r.flag == "processing" or r.flag == "craft"
     end)
 end
 
+--- Like craft.load, plus grow recipes. path nil → sectioned program cfg.
 function craft.loadRequest(path)
-    local all = recipes.load(path or DEFAULT_CFG)
+    local all = recipes.load(path)
     return recipes.filter(all, function(r)
         return r.flag == "processing" or r.flag == "craft" or r.flag == "grow"
     end)

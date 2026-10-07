@@ -1,15 +1,15 @@
 -- Autonomous wheat → wheat_grain miller for bg / dedicated computer.
 -- Grain lasts longer than raw wheat; keeps processor_30 busy when craft UI is idle.
 --
--- Requires on this computer: storage.cfg, recipes.cfg, and craft modules.
+-- Requires on this computer: wheat_grain.cfg (or storage.cfg + recipes.cfg) + craft modules.
 -- Shares machine_lock with craft_ui if both run on the same multishell computer.
 --
--- storage.cfg optional keys:
+-- [storage] optional keys:
 --   mill_interval | 5     -- seconds between idle polls
 --   mill_batch    | 32    -- max recipe sets per craft.run
 --
 -- Bundle:  python tools/bundle_project.py craft wheat_grain
--- Deploy:  dist/wheat_grain.lua + recipes.cfg + storage.cfg
+-- Deploy:  dist/wheat_grain.lua + wheat_grain.cfg
 
 package.path = package.path
     .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"
