@@ -17,14 +17,26 @@ local function defaults()
         threshold_critical = 0.95,
         threshold_warn = 0.75,
         threshold_emergency = 0.40,
+        -- Fill mode: enter at threshold_low, exit (and ДГ catch-up target) here
+        engine_target = 0.95,
+        -- Maintain: step turbines only when |net| > rated * mult
+        turbine_rated_eut = 9012,
+        turbine_diff_mult = 2,
+        maintain_net_eut = -2000, -- legacy unused
         ramp_speed_pct = 60,
-        drain_override_eut = -4000,
-        cooldown = 20,
+        drain_override_eut = -4000, -- below this → ДГ spike response
+        spike_clear_eut = 0,        -- unused (kept for cfg compat)
+        fill_enable_cooldown = 2,   -- short gap between turbine enables in fill
+        cooldown = 20,          -- turbines (inertia)
+        engine_cooldown = 2,    -- ДГ recipe ~2s — peaker can switch faster
+        engine_off_cooldown = 15, -- after parking a ДГ in maintain (anti-chatter)
         measure_interval = 5,
         boot_wait = 120,
         boot_poll = 2,
         rotor_warn_pct = 20,
         max_history = 4,
+        -- Assumed EU/t while engine recipe is mid-cycle (dynamo hatch hides controller OutputPerSec)
+        engine_rated_eut = 32768,
     }
 end
 
@@ -98,6 +110,8 @@ local function parseLine(cfg, line, lineNo)
         setNumber(cfg, "drain_override_eut", val, lineNo)
     elseif key == "cooldown" then
         setNumber(cfg, "cooldown", val, lineNo)
+    elseif key == "engine_cooldown" then
+        setNumber(cfg, "engine_cooldown", val, lineNo)
     elseif key == "measure_interval" then
         setNumber(cfg, "measure_interval", val, lineNo)
     elseif key == "boot_wait" then
@@ -106,6 +120,22 @@ local function parseLine(cfg, line, lineNo)
         setNumber(cfg, "boot_poll", val, lineNo)
     elseif key == "rotor_warn_pct" then
         setNumber(cfg, "rotor_warn_pct", val, lineNo)
+    elseif key == "engine_rated_eut" then
+        setNumber(cfg, "engine_rated_eut", val, lineNo)
+    elseif key == "engine_target" then
+        setNumber(cfg, "engine_target", val, lineNo)
+    elseif key == "turbine_rated_eut" then
+        setNumber(cfg, "turbine_rated_eut", val, lineNo)
+    elseif key == "turbine_diff_mult" then
+        setNumber(cfg, "turbine_diff_mult", val, lineNo)
+    elseif key == "maintain_net_eut" or key == "maintain_net" then
+        setNumber(cfg, "maintain_net_eut", val, lineNo)
+    elseif key == "spike_clear_eut" or key == "spike_clear" then
+        setNumber(cfg, "spike_clear_eut", val, lineNo)
+    elseif key == "fill_enable_cooldown" then
+        setNumber(cfg, "fill_enable_cooldown", val, lineNo)
+    elseif key == "engine_off_cooldown" then
+        setNumber(cfg, "engine_off_cooldown", val, lineNo)
     else
         error(("power.cfg line %s: unknown key %q"):format(tostring(lineNo), key))
     end

@@ -1,17 +1,23 @@
--- GTCEU large gas turbine controller for power substations (CC: Tweaked / TFG).
+-- GTCEU power substation controller (CC: Tweaked / TFG).
 -- Bundle:  python tools/bundle_project.py power
 -- Deploy:  dist/power.lua + power.cfg
+--
+-- Machine APIs live in adapters:
+--   gas_turbine.lua, combustion_engine.lua (+ machine_common.lua)
 
 package.path = package.path
     .. ";/power/?.lua;power/?.lua;/shared/?.lua;shared/?.lua"
 
 local configMod = require("config")
+local gasTurbine = require("gas_turbine")
+local combustion = require("combustion_engine")
+local common = require("machine_common")
 
 local cfg, cfgPath, cfgLoaded = configMod.load()
 
 -- ========================= STATE =========================
-local turbines = {} -- gas_large_turbine
-local engines = {}  -- extreme_combustion_engine
+local turbines = {}
+local engines = {}
 local substation = nil
 local substationName = nil
 local monitor = nil
@@ -22,20 +28,15 @@ local netDirty = false
 local energyHistory = {}
 local tickCounter = 0
 local cooldownCounter = 0
-local lastNetEuT = 0 -- preferred: input - output from substation
+local lastNetEuT = 0
 local lastInputEuT = 0
 local lastOutputEuT = 0
-local netFromApi = false -- true when getInput/OutputPerSec worked
+local netFromApi = false
+-- Fill mode: enter at threshold_low (60%), exit at engine_target (95%).
+-- Outside fill: turbines keep a mild deficit; ДГ only for consumption spikes.
+local fillMode = false
 
 -- ========================= HELPERS =========================
-local function safeCall(name, method, ...)
-    local ok, a, b, c = pcall(peripheral.call, name, method, ...)
-    if not ok then
-        return nil
-    end
-    return a, b, c
-end
-
 local function safeMethod(obj, method, ...)
     if not obj or type(obj[method]) ~= "function" then
         return nil
@@ -47,26 +48,12 @@ local function safeMethod(obj, method, ...)
     return a, b, c
 end
 
-local function indexFromName(name)
-    return tonumber(name:match("_(%d+)$"))
-end
-
 local function networkSummary()
     return table.concat(peripheral.getNames(), ", ")
 end
 
 local function fmtNum(n)
-    n = tonumber(n) or 0
-    local sign = n < 0 and "-" or ""
-    local a = math.abs(n)
-    if a >= 1e9 then
-        return sign .. string.format("%.2fG", a / 1e9)
-    elseif a >= 1e6 then
-        return sign .. string.format("%.2fM", a / 1e6)
-    elseif a >= 1e4 then
-        return sign .. string.format("%.1fk", a / 1e3)
-    end
-    return sign .. string.format("%.0f", a)
+    return common.fmtNum(n)
 end
 
 local function flushEvents()
@@ -90,6 +77,30 @@ local function sleepWatch(seconds)
             return true
         end
     end
+end
+
+local function adapterFor(unit)
+    if unit.kind == combustion.kind then
+        return combustion
+    end
+    return gasTurbine
+end
+
+local function eachGen(fn)
+    for _, t in ipairs(turbines) do
+        fn(t)
+    end
+    for _, t in ipairs(engines) do
+        fn(t)
+    end
+end
+
+local function genCount()
+    return #turbines + #engines
+end
+
+local function genLabel(unit)
+    return adapterFor(unit).label(unit)
 end
 
 -- ========================= DISCOVERY =========================
@@ -121,102 +132,20 @@ local function discoverMonitor()
     return nil
 end
 
-local function discoverBySubstr(substr, kind)
-    local list = {}
-    if not substr or substr == "" then
-        return list
-    end
-    for _, name in ipairs(peripheral.getNames()) do
-        if name:find(substr, 1, true) then
-            local idx = indexFromName(name)
-            if idx == nil then
-                idx = #list
-            end
-            list[#list + 1] = {
-                name = name,
-                index = idx,
-                kind = kind, -- "turbine" | "engine"
-                totalRunTime = 0,
-                lastSpeed = 0,
-                lastProduction = 0,
-                lastDurability = 100,
-                hasRotor = true,
-                isActive = false,
-                workingEnabled = false,
-                enabledAt = nil,
-            }
-        end
-    end
-    table.sort(list, function(a, b)
-        if a.index == b.index then
-            return a.name < b.name
-        end
-        return a.index < b.index
-    end)
-    return list
-end
-
-local function syncWorkingFlags(list)
-    for _, t in ipairs(list) do
-        t.workingEnabled = safeCall(t.name, "isWorkingEnabled") == true
-        if t.workingEnabled and not t.enabledAt then
-            t.enabledAt = os.clock()
-        elseif not t.workingEnabled then
-            t.enabledAt = nil
-        end
-    end
-end
-
-local function applyGenList(list, prevList)
-    local prev = {}
-    for _, t in ipairs(prevList) do
-        prev[t.name] = t
-    end
-    for _, t in ipairs(list) do
-        local old = prev[t.name]
-        if old then
-            t.totalRunTime = old.totalRunTime
-            t.lastSpeed = old.lastSpeed
-            t.lastProduction = old.lastProduction
-            t.lastDurability = old.lastDurability
-            t.enabledAt = old.enabledAt
-        end
-    end
-    syncWorkingFlags(list)
-    for i, t in ipairs(list) do
-        t.slot = i
-    end
-    return list
-end
-
-local function eachGen(fn)
-    for _, t in ipairs(turbines) do
-        fn(t)
-    end
-    for _, t in ipairs(engines) do
-        fn(t)
-    end
-end
-
-local function genCount()
-    return #turbines + #engines
-end
-
 local function discoverAllGens()
-    return discoverBySubstr(cfg.turbine_substr, "turbine"),
-        discoverBySubstr(cfg.engine_substr, "engine")
+    return gasTurbine.discover(cfg.turbine_substr),
+        combustion.discover(cfg.engine_substr)
 end
 
 local function applyAllGens(tList, eList)
-    turbines = applyGenList(tList, turbines)
-    engines = applyGenList(eList, engines)
+    turbines = gasTurbine.apply(tList, turbines)
+    engines = combustion.apply(eList, engines)
     netDirty = false
 end
 
--- ========================= MONITOR SCALE / LAYOUT =========================
-local TURBINE_COL_W = 28
-local TURBINE_COL_GAP = 4
--- Status block ends at line 8; tables start at 10
+-- ========================= MONITOR LAYOUT =========================
+local COL_W = 28
+local COL_GAP = 4
 local TABLES_START_Y = 10
 
 local function tableRows(n)
@@ -228,11 +157,9 @@ local function tableRows(n)
     return math.ceil(n / cols), cols
 end
 
---- Gas turbines table, then combustion engines table below (both 2-col).
 local function layoutPlan()
     local tRows, tCols = tableRows(#turbines)
     local eRows, eCols = tableRows(#engines)
-    local gap = TURBINE_COL_GAP
     local y = TABLES_START_Y
     local turbineHeaderY, turbineFirstY = nil, nil
     local engineHeaderY, engineFirstY = nil, nil
@@ -240,11 +167,11 @@ local function layoutPlan()
     if #turbines > 0 then
         turbineHeaderY = y
         turbineFirstY = y + 1
-        y = turbineFirstY + tRows -- next free line after last turbine row
+        y = turbineFirstY + tRows
     end
     if #engines > 0 then
         if #turbines > 0 then
-            y = y + 1 -- blank between tables
+            y = y + 1
         end
         engineHeaderY = y
         engineFirstY = y + 1
@@ -255,14 +182,14 @@ local function layoutPlan()
     return {
         tCols = tCols,
         eCols = eCols,
-        colW = TURBINE_COL_W,
-        gap = gap,
+        colW = COL_W,
+        gap = COL_GAP,
         turbineHeaderY = turbineHeaderY,
         turbineFirstY = turbineFirstY,
         engineHeaderY = engineHeaderY,
         engineFirstY = engineFirstY,
         needH = math.max(y - 1, TABLES_START_Y),
-        needW = useTwo and (TURBINE_COL_W * 2 + gap) or 40,
+        needW = useTwo and (COL_W * 2 + COL_GAP) or 40,
     }
 end
 
@@ -270,10 +197,8 @@ local function applyMonitorScale()
     if not monitor then
         return
     end
-
     local plan = layoutPlan()
     local chosen = 0.5
-
     if cfg.text_scale == "auto" then
         for scale = 5, 0.5, -0.5 do
             monitor.setTextScale(scale)
@@ -286,7 +211,6 @@ local function applyMonitorScale()
     else
         chosen = cfg.text_scale
     end
-
     monitor.setTextScale(chosen)
     textScale = chosen
     monW, monH = monitor.getSize()
@@ -322,8 +246,8 @@ local function waitForGens(timeoutSec)
         end
         local now = os.clock()
         if now - lastPrint >= 5 then
-            print("Ждём генераторы (*" .. cfg.turbine_substr
-                .. "* / *" .. cfg.engine_substr .. "*)... " .. networkSummary())
+            print("Ждём генераторы (*" .. tostring(cfg.turbine_substr)
+                .. "* / *" .. tostring(cfg.engine_substr) .. "*)... " .. networkSummary())
             lastPrint = now
         end
         sleepWatch(cfg.boot_poll)
@@ -398,19 +322,15 @@ local function getEnergyRatio()
     return energy / capacity, energy, capacity
 end
 
---- Substation getInput/OutputPerSec: name says PerSec; GT tooltips say EU/t,
---- but values match EU/s vs the cover UI (÷20 ≈ «Вывод в среднем» EU/t).
 local function readSubstationFlowEuT()
     local inp = safeMethod(substation, "getInputPerSec")
     local out = safeMethod(substation, "getOutputPerSec")
     if inp == nil or out == nil then
         return nil
     end
-    local inpT, outT = inp / 20, out / 20
-    return inpT - outT, inpT, outT
+    return inp / 20 - out / 20, inp / 20, out / 20
 end
 
---- Seconds until empty (net<0) or full (net>0), or nil if N/A.
 local function etaSeconds(energy, capacity, netEuT)
     if not netEuT or netEuT == 0 then
         return nil, nil
@@ -419,7 +339,6 @@ local function etaSeconds(energy, capacity, netEuT)
         if energy <= 0 then
             return 0, "empty"
         end
-        -- EU / (EU/t) = ticks; ticks/20 = seconds
         return (energy / -netEuT) / 20, "empty"
     end
     local room = capacity - energy
@@ -471,85 +390,35 @@ local function addEnergyMeasurement()
         local newest = energyHistory[#energyHistory]
         local timeDiff = (newest.tick - oldest.tick) * cfg.measure_interval
         if timeDiff > 0 then
-            -- ΔEU/s → EU/t
             lastNetEuT = ((newest.energy - oldest.energy) / timeDiff) / 20
         end
     end
 end
 
--- ========================= TURBINES =========================
-local function getRotorSpeed(t)
-    local current = safeCall(t.name, "getRotorSpeed") or 0
-    local max = safeCall(t.name, "getMaxRotorHolderSpeed") or 1
-    if max == 0 then
-        max = 1
-    end
-    return (current / max) * 100
-end
-
-local function isWorking(t)
-    local v = safeCall(t.name, "isWorkingEnabled")
-    if v == nil then
-        return t.workingEnabled
-    end
-    t.workingEnabled = v and true or false
-    return t.workingEnabled
-end
-
-local function setWorking(t, state, graceful)
-    if state then
-        safeCall(t.name, "setSuspendAfterFinish", false)
-        safeCall(t.name, "setWorkingEnabled", true)
-        t.workingEnabled = true
-        t.enabledAt = os.clock()
+-- ========================= CONTROL =========================
+local function setWorking(unit, state, graceful, cooldownOverride)
+    adapterFor(unit).setWorking(unit, state, graceful)
+    if cooldownOverride ~= nil then
+        cooldownCounter = cooldownOverride
+    elseif unit.kind == combustion.kind then
+        cooldownCounter = cfg.engine_cooldown or 2
     else
-        if graceful then
-            -- Finish current cycle before stopping (less thrash / fuel waste)
-            safeCall(t.name, "setSuspendAfterFinish", true)
-            safeCall(t.name, "setWorkingEnabled", false)
-        else
-            safeCall(t.name, "setWorkingEnabled", false)
-        end
-        t.workingEnabled = false
-        t.enabledAt = nil
-    end
-    cooldownCounter = cfg.cooldown
-end
-
-local function updateOneGenStats(t)
-    t.isActive = safeCall(t.name, "isActive") == true
-    t.lastProduction = safeCall(t.name, "getCurrentProduction") or 0
-    isWorking(t)
-
-    if t.kind == "engine" then
-        -- Combustion engines: no rotor; treat as ramped when actively producing
-        t.hasRotor = true
-        t.lastDurability = 100
-        if t.workingEnabled and (t.isActive or (t.lastProduction or 0) > 0) then
-            t.lastSpeed = 100
-        else
-            t.lastSpeed = 0
-        end
-    else
-        local has = safeCall(t.name, "hasRotor")
-        t.hasRotor = (has ~= false)
-        t.lastSpeed = getRotorSpeed(t)
-        t.lastDurability = safeCall(t.name, "getRotorDurabilityPercent") or t.lastDurability or 100
-    end
-
-    if t.isActive then
-        t.totalRunTime = t.totalRunTime + cfg.measure_interval
+        cooldownCounter = cfg.cooldown or 20
     end
 end
 
-local function updateTurbineStats()
-    eachGen(updateOneGenStats)
+local function updateAllStats()
+    for _, t in ipairs(turbines) do
+        gasTurbine.updateStats(t, cfg.measure_interval)
+    end
+    for _, t in ipairs(engines) do
+        combustion.updateStats(t, cfg.measure_interval, cfg.engine_rated_eut)
+    end
 end
 
 local function anyEnabledStillRamping()
-    -- Only gas turbines have multi-minute rotor ramp
     for _, t in ipairs(turbines) do
-        if t.workingEnabled and (t.lastSpeed or 0) < cfg.ramp_speed_pct then
+        if gasTurbine.isRamping(t, cfg.ramp_speed_pct) then
             return true, t
         end
     end
@@ -559,112 +428,184 @@ end
 local function totalProduction()
     local sum = 0
     eachGen(function(t)
-        if t.workingEnabled then
-            sum = sum + (t.lastProduction or 0)
-        end
+        sum = sum + (t.lastProduction or 0)
     end)
     return sum
 end
 
-local function genLabel(t)
-    if t.kind == "engine" then
-        return "двигатель #" .. tostring(t.slot)
+--- Pick best unit from list (enable: speed/runtime/dur; disable: low prod/runtime).
+local function selectBest(list, forEnable)
+    local best, bestA, bestB, bestC = nil, nil, nil, nil
+    for _, t in ipairs(list) do
+        local mod = adapterFor(t)
+        if forEnable then
+            if mod.canEnable(t) then
+                local speed, run, dur = t.lastSpeed or 0, t.totalRunTime or 0, t.lastDurability or 0
+                if not best
+                    or speed > bestA
+                    or (speed == bestA and run > bestB)
+                    or (speed == bestA and run == bestB and dur > bestC)
+                then
+                    best, bestA, bestB, bestC = t, speed, run, dur
+                end
+            end
+        else
+            if mod.isWorking(t) then
+                local prod, run = t.lastProduction or 0, t.totalRunTime or 0
+                if not best or prod < bestA or (prod == bestA and run < bestB) then
+                    best, bestA, bestB = t, prod, run
+                end
+            end
+        end
     end
-    return "турбина #" .. tostring(t.slot)
+    return best
 end
 
 local function selectTurbineToEnable()
-    local best, bestSpeed, bestRun, bestDur = nil, -1, -1, -1
-    eachGen(function(t)
-        if not isWorking(t) and t.hasRotor ~= false then
-            local speed = t.lastSpeed or 0
-            local run = t.totalRunTime or 0
-            local dur = t.lastDurability or 0
-            -- Prefer spinning gas rotors; cold engines sort after (speed 0)
-            if speed > bestSpeed
-                or (speed == bestSpeed and run > bestRun)
-                or (speed == bestSpeed and run == bestRun and dur > bestDur)
-            then
-                best, bestSpeed, bestRun, bestDur = t, speed, run, dur
-            end
-        end
-    end)
-    return best
+    return selectBest(turbines, true)
 end
 
-local function selectTurbineToDisable()
-    local best, bestProd, bestRun = nil, nil, nil
-    eachGen(function(t)
-        if isWorking(t) then
-            local prod = t.lastProduction or 0
-            local run = t.totalRunTime or 0
-            if not best
-                or prod < bestProd
-                or (prod == bestProd and run < bestRun)
-            then
-                best, bestProd, bestRun = t, prod, run
-            end
-        end
-    end)
-    return best
+local function selectEngineToEnable()
+    return selectBest(engines, true)
+end
+
+--- Prefer shutting engines before turbines (peaker off first, base load stays).
+local function selectToDisable()
+    local e = selectBest(engines, false)
+    if e then
+        return e
+    end
+    return selectBest(turbines, false)
 end
 
 local function canEnableDespiteRamp(ratio, netEuT)
-    if ratio < cfg.threshold_emergency then
-        return true
-    end
-    if netEuT < cfg.drain_override_eut then
-        return true
-    end
-    return false
+    return ratio < cfg.threshold_emergency or netEuT < cfg.drain_override_eut
 end
 
-local function updateTurbinesCritical(ratio)
+local function updateCritical(ratio)
     if ratio <= cfg.threshold_critical then
         return false
     end
-    local turbine = selectTurbineToDisable()
-    if turbine then
-        setWorking(turbine, false, false) -- immediate at critical
-        print("КРИТИЧНО: выключен " .. genLabel(turbine))
+    -- Past target — never re-enter fill until threshold_low again
+    fillMode = false
+    local unit = selectToDisable()
+    if unit then
+        setWorking(unit, false, false)
+        print("КРИТИЧНО: выключен " .. genLabel(unit))
         return true
     end
     return false
 end
 
-local function updateTurbines()
+--- Fill mode (60%→95%): all turbines + ДГ catch-up.
+--- Maintain: turbines hold a slight deficit; ДГ only when turbines can't cover.
+local function updateControl()
     local ratio = getEnergyRatio()
     local net = lastNetEuT
+    local fillEnter = cfg.threshold_low or 0.60
+    local fillExit = cfg.engine_target or cfg.threshold_critical or 0.95
+    local turbineRated = cfg.turbine_rated_eut or 9012
+    local turbineDiff = turbineRated * (cfg.turbine_diff_mult or 2)
+    local spikeNet = cfg.drain_override_eut or -4000
+    local fillCd = cfg.fill_enable_cooldown or 2
+    -- After shutting a maintain/spike ДГ, stay quiet so net wobble can't re-toggle
+    local dgOffCd = cfg.engine_off_cooldown or 15
 
-    if updateTurbinesCritical(ratio) then
+    if updateCritical(ratio) then
         return
     end
     if cooldownCounter > 0 then
         return
     end
 
-    local wantEnable = ratio < cfg.threshold_low
-        or (ratio < cfg.threshold_warn and net < 0)
-    local wantDisable = ratio > cfg.threshold_high and net > 0
+    -- Enter fill at 60%. Exit immediately on first touch of 95% (no re-enable if we dip).
+    if not fillMode and ratio <= fillEnter then
+        fillMode = true
+        print(("Режим заполнения (%.0f%%)"):format(ratio * 100))
+    elseif fillMode and ratio >= fillExit then
+        fillMode = false
+        print("Заполнение завершено")
+    end
 
-    if wantEnable then
-        local ramping = anyEnabledStillRamping()
-        if ramping and not canEnableDespiteRamp(ratio, net) then
+    if fillMode then
+        local turbineWindDown = ratio >= (cfg.threshold_high or 0.90)
+
+        -- From 90%: start killing turbines early (cooldown + rotor inertia)
+        if turbineWindDown then
+            local t = selectBest(turbines, false)
+            if t then
+                setWorking(t, false, true, fillCd)
+                print("Выключен " .. genLabel(t) .. " (с 90%)")
+                return
+            end
+        else
+            local t = selectTurbineToEnable()
+            if t then
+                local rampBlocked = anyEnabledStillRamping()
+                    and not canEnableDespiteRamp(ratio, net)
+                if not rampBlocked then
+                    setWorking(t, true, nil, fillCd)
+                    print("Включен " .. genLabel(t) .. " (заполнение)")
+                    return
+                end
+            end
+        end
+
+        -- ДГ догоняют до 95%
+        local e = selectEngineToEnable()
+        if e then
+            setWorking(e, true)
+            print("Включен " .. genLabel(e) .. " (догон)")
             return
         end
-        if ramping and net >= 0 and ratio >= cfg.threshold_emergency then
+        return
+    end
+
+    -- ===== MAINTAIN (outside fill) =====
+    -- Turbines are base load. ДГ only if emergency / turbines exhausted.
+
+    -- Leftover ДГ after fill or spike → park them (long cooldown = no chatter)
+    local canAddTurbine = selectTurbineToEnable() ~= nil
+    local needPeak = ratio < (cfg.threshold_emergency or 0.40)
+        or (net < spikeNet and not canAddTurbine)
+
+    if not needPeak then
+        local e = selectBest(engines, false)
+        if e then
+            setWorking(e, false, true, dgOffCd)
+            print("Выключен " .. genLabel(e) .. " (не нужен)")
             return
         end
-        local turbine = selectTurbineToEnable()
-        if turbine then
-            setWorking(turbine, true)
-            print("Включен " .. genLabel(turbine))
+    end
+
+    -- Turbines: only step when |net| > 2× rated (avoids 9k flip-flop around 0)
+    if net > turbineDiff then
+        local t = selectBest(turbines, false)
+        if t then
+            setWorking(t, false, true)
+            print("Выключен " .. genLabel(t) .. " (избыток)")
+            return
         end
-    elseif wantDisable then
-        local turbine = selectTurbineToDisable()
-        if turbine then
-            setWorking(turbine, false, true)
-            print("Выключен " .. genLabel(turbine))
+    elseif net < -turbineDiff then
+        local rampBlocked = anyEnabledStillRamping()
+            and not canEnableDespiteRamp(ratio, net)
+        if not rampBlocked then
+            local t = selectTurbineToEnable()
+            if t then
+                setWorking(t, true)
+                print("Включен " .. genLabel(t) .. " (база)")
+                return
+            end
+        end
+    end
+
+    -- Peak: turbines already maxed (or emergency) and still draining hard
+    if needPeak then
+        local e = selectEngineToEnable()
+        if e then
+            setWorking(e, true)
+            print("Включен " .. genLabel(e) .. " (скачок)")
+            return
         end
     end
 end
@@ -697,31 +638,17 @@ local function drawBar(ratio, y)
     writeAt(1, y, label .. bar)
 end
 
-local function genStatus(t)
-    if t.kind == "turbine" and not t.hasRotor then
-        return "NOR", colors.red
-    end
-    if t.kind == "turbine" and t.workingEnabled and (t.lastSpeed or 0) < cfg.ramp_speed_pct then
-        return "RMP", colors.yellow
-    end
-    if t.workingEnabled then
-        return "ON ", colors.lime
-    end
-    return "OFF", colors.white
-end
-
-local function drawGenTable(list, headerY, firstY, titleFull, titleShort, cols, colW, gap, asEngine)
+local function drawGenTable(list, mod, headerY, firstY, cols, colW, gap)
     if #list == 0 or not headerY or not firstY then
         return
     end
     if cols == 2 and monW < (colW * 2 + gap) then
         cols = 1
     end
-    -- 2 columns → full labels; 1 column → abbreviated (fits narrow scale)
-    writeAt(1, headerY, (cols >= 2) and titleFull or titleShort)
+    writeAt(1, headerY, mod.title(cols >= 2))
     local rowsPerCol = math.ceil(#list / cols)
 
-    for i, t in ipairs(list) do
+    for i, unit in ipairs(list) do
         local col = math.floor((i - 1) / rowsPerCol)
         local row = (i - 1) % rowsPerCol
         if col >= cols then
@@ -732,33 +659,8 @@ local function drawGenTable(list, headerY, firstY, titleFull, titleShort, cols, 
         if y > monH then
             break
         end
-
-        local status, color = genStatus(t)
-        local line
-        if asEngine then
-            line = string.format(
-                "%2d:[%s] %5s %dm",
-                t.slot or i,
-                status,
-                fmtNum(t.lastProduction or 0),
-                math.floor((t.totalRunTime or 0) / 60)
-            )
-        else
-            local dur = t.lastDurability or 0
-            if t.hasRotor and dur <= cfg.rotor_warn_pct and color ~= colors.red then
-                color = colors.orange
-            end
-            line = string.format(
-                "%2d:[%s] %3.0f%% %5s %3.0f%% %dm",
-                t.slot or i,
-                status,
-                t.lastSpeed or 0,
-                fmtNum(t.lastProduction or 0),
-                dur,
-                math.floor((t.totalRunTime or 0) / 60)
-            )
-        end
-        writeAt(x, y, line, color)
+        local status, color = mod.status(unit, cfg.ramp_speed_pct, cfg.rotor_warn_pct)
+        writeAt(x, y, mod.formatLine(unit, status), color)
     end
 end
 
@@ -813,15 +715,15 @@ local function draw()
         writeAt(1, 6, "Баланс стабилен", colors.white)
     end
 
-    if cooldownCounter > 0 then
+    if fillMode then
+        local tgt = (cfg.engine_target or cfg.threshold_critical or 0.95) * 100
+        writeAt(1, 7, string.format("Заполнение → %.0f%%", tgt), colors.yellow)
+    elseif cooldownCounter > 0 then
         writeAt(1, 7, string.format("Пауза: %dс", cooldownCounter), colors.gray)
+    elseif anyEnabledStillRamping() then
+        writeAt(1, 7, "Разгон (ждём)", colors.yellow)
     else
-        local ramping = anyEnabledStillRamping()
-        if ramping then
-            writeAt(1, 7, "Разгон (ждём)", colors.yellow)
-        else
-            writeAt(1, 7, "Готов")
-        end
+        writeAt(1, 7, "Поддержание")
     end
 
     writeAt(1, 8, string.format(
@@ -832,26 +734,14 @@ local function draw()
 
     local plan = layoutPlan()
     drawGenTable(
-        turbines,
-        plan.turbineHeaderY,
-        plan.turbineFirstY,
-        "Турбины (скорость/EU/t/прочность/аптайм):",
-        "Турбины (скр/EU/t/прч/раб):",
-        plan.tCols,
-        plan.colW,
-        plan.gap,
-        false
+        turbines, gasTurbine,
+        plan.turbineHeaderY, plan.turbineFirstY,
+        plan.tCols, plan.colW, plan.gap
     )
     drawGenTable(
-        engines,
-        plan.engineHeaderY,
-        plan.engineFirstY,
-        "Двигатели (EU/t/аптайм):",
-        "Двигатели (EU/t/раб):",
-        plan.eCols,
-        plan.colW,
-        plan.gap,
-        true
+        engines, combustion,
+        plan.engineHeaderY, plan.engineFirstY,
+        plan.eCols, plan.colW, plan.gap
     )
 end
 
@@ -871,7 +761,7 @@ local function main()
     end)
 
     addEnergyMeasurement()
-    updateTurbineStats()
+    updateAllStats()
 
     local measureCounter = 0
     while true do
@@ -889,19 +779,26 @@ local function main()
 
             if substation then
                 local ratio = getEnergyRatio()
-
                 if ratio > cfg.threshold_critical then
-                    updateTurbinesCritical(ratio)
+                    updateCritical(ratio)
                 end
 
+                -- Energy + turbine stats on measure_interval; engines every second (2s recipes)
                 measureCounter = measureCounter + 1
                 if measureCounter >= cfg.measure_interval then
                     addEnergyMeasurement()
-                    updateTurbineStats()
-                    if ratio <= cfg.threshold_critical then
-                        updateTurbines()
+                    for _, t in ipairs(turbines) do
+                        gasTurbine.updateStats(t, cfg.measure_interval)
                     end
                     measureCounter = 0
+                end
+                for _, t in ipairs(engines) do
+                    combustion.updateStats(t, 1, cfg.engine_rated_eut)
+                end
+
+                -- Control every second so engine_cooldown (~2s) can actually fire
+                if ratio <= cfg.threshold_critical then
+                    updateControl()
                 end
             end
         end
