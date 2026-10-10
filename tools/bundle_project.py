@@ -4,6 +4,10 @@
 Usage:
   python tools/bundle_project.py ae2_feed
   python tools/bundle_project.py crystals
+  python tools/bundle_project.py power
+  python tools/bundle_project.py ae_stats sampler
+  python tools/bundle_project.py ae_stats display
+  python tools/bundle_project.py ae_stats graphview
   python tools/bundle_project.py craft craft_ui
   python tools/bundle_project.py craft greenhouse_clean
   python tools/bundle_project.py craft wheat_grain
@@ -11,6 +15,7 @@ Usage:
 
 Resolves require("name") from <project>/ then shared/. Writes dist/<entry>.lua.
 COPY_CFG copies a single .cfg next to the bundle.
+COPY_CFG_BY_ENTRY copies <entry>.cfg for multi-entry projects.
 MERGE_CFG merges several source .cfg files into dist/<entry>.cfg
 (e.g. craft pizza_maintain → pizza_maintain.lua + pizza_maintain.cfg).
 Projects in EMBED_CFG bake <project>/*.cfg into the bundle as cfg_embed.
@@ -48,6 +53,14 @@ AE2_FEED_CFG_HINT = (
 CRYSTALS_CFG_HINT = (
     "-- Also copy crystals.cfg next to this file on the computer."
 )
+POWER_CFG_HINT = (
+    "-- Also copy power.cfg next to this file on the computer."
+)
+AE_STATS_CFG_HINT = (
+    "-- Also copy the matching .cfg next to this file "
+    "(sampler.cfg / display.cfg / graphview.cfg; "
+    "display+graphview also need labels.cfg)."
+)
 
 # Projects that embed <project>/<name>.cfg as package.preload["cfg_embed"].
 EMBED_CFG: dict[str, str] = {}
@@ -56,6 +69,24 @@ EMBED_CFG: dict[str, str] = {}
 COPY_CFG: dict[str, str] = {
     "crystals": "crystals.cfg",
     "ae2_feed": "ae2_feed.cfg",
+    "power": "power.cfg",
+}
+
+# project -> entry -> cfg filename (copied to dist/<cfg>).
+COPY_CFG_BY_ENTRY: dict[str, dict[str, str]] = {
+    "ae_stats": {
+        "sampler": "sampler.cfg",
+        "display": "display.cfg",
+        "graphview": "graphview.cfg",
+    },
+}
+
+# Extra files copied alongside an entry bundle (e.g. labels.cfg).
+EXTRA_COPY_BY_ENTRY: dict[str, dict[str, tuple[str, ...]]] = {
+    "ae_stats": {
+        "display": ("labels.cfg",),
+        "graphview": ("labels.cfg",),
+    },
 }
 
 # Merge several source cfgs into one sectioned dist file named like the entry.
@@ -170,6 +201,10 @@ def build_bundle(
         parts.append(AE2_FEED_CFG_HINT + "\n")
     elif project == "crystals":
         parts.append(CRYSTALS_CFG_HINT + "\n")
+    elif project == "power":
+        parts.append(POWER_CFG_HINT + "\n")
+    elif project == "ae_stats":
+        parts.append(AE_STATS_CFG_HINT + "\n")
     parts.append("-- Generated package.preload modules + entrypoint.\n\n")
 
     if embed_cfg_path is not None and embed_cfg_path.is_file():
@@ -263,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         out_name = "ae2_feed"
     elif project == "crystals" and entry == "main":
         out_name = "crystals"
+    elif project == "power" and entry == "main":
+        out_name = "power"
     else:
         out_name = entry
     out_dir = REPO_ROOT / "dist"
@@ -285,13 +322,21 @@ def main(argv: list[str] | None = None) -> int:
             f"<- {', '.join(sources)}"
         )
     else:
-        copy_name = COPY_CFG.get(project)
+        entry_map = COPY_CFG_BY_ENTRY.get(project) or {}
+        copy_name = entry_map.get(entry) or COPY_CFG.get(project)
         if copy_name:
             src_cfg = project_dir / copy_name
             if src_cfg.is_file():
                 dst_cfg = out_dir / copy_name
                 shutil.copyfile(src_cfg, dst_cfg)
                 print(f"  copied config: {dst_cfg.relative_to(REPO_ROOT).as_posix()}")
+        extra = (EXTRA_COPY_BY_ENTRY.get(project) or {}).get(entry) or ()
+        for extra_name in extra:
+            src_extra = project_dir / extra_name
+            if src_extra.is_file():
+                dst_extra = out_dir / extra_name
+                shutil.copyfile(src_extra, dst_extra)
+                print(f"  copied extra: {dst_extra.relative_to(REPO_ROOT).as_posix()}")
     return 0
 
 
