@@ -67,4 +67,26 @@ A.suite("history", {
             A.eq(keys[2], "z")
         end,
     },
+    {
+        name = "max_series prunes oldest-touched keys",
+        fn = function()
+            T.stub.setEpochMs(10000 * 1000)
+            local h = history.new({ retain = 10000, max_series = 2 })
+            h:add("old", 1, 9000)
+            h:add("mid", 1, 9500)
+            h:add("new", 1, 9900)
+            local keys = h:items()
+            A.eq(#keys, 2)
+            A.falsy((function()
+                for i = 1, #keys do
+                    if keys[i] == "old" then
+                        return true
+                    end
+                end
+                return false
+            end)(), "oldest key dropped")
+            A.contains(keys, "new")
+            A.contains(keys, "mid")
+        end,
+    },
 })

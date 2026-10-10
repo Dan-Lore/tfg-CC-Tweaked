@@ -5,6 +5,7 @@ local util = require("util")
 local history = {}
 
 local DEFAULT_RETAIN = 2.5 * 3600 -- seconds
+local DEFAULT_MAX_SERIES = 512
 
 local function now()
     return os.epoch("utc") / 1000
@@ -29,6 +30,39 @@ local function prune(self, item)
     end
 end
 
+--- Drop oldest-touched series keys when over max_series.
+local function pruneSeriesKeys(self)
+    local max = self.max_series
+    if not max or max <= 0 then
+        return
+    end
+    local count = 0
+    for _ in pairs(self.series) do
+        count = count + 1
+    end
+    if count <= max then
+        return
+    end
+    local keys = {}
+    for k in pairs(self.series) do
+        keys[#keys + 1] = k
+    end
+    table.sort(keys, function(a, b)
+        local ta = self.touched[a] or 0
+        local tb = self.touched[b] or 0
+        if ta ~= tb then
+            return ta < tb
+        end
+        return tostring(a) < tostring(b)
+    end)
+    local remove = count - max
+    for i = 1, remove do
+        local k = keys[i]
+        self.series[k] = nil
+        self.touched[k] = nil
+    end
+end
+
 local methods = {}
 
 function methods:add(item, amount, t)
@@ -49,11 +83,17 @@ function methods:add(item, amount, t)
     else
         pts[#pts + 1] = { t = t, amount = amount }
     end
+    self.touched[item] = t
+    self.dirty = true
     prune(self, item)
+    pruneSeriesKeys(self)
 end
 
 function methods:get(item, since)
     local pts = self.series[item] or {}
+    if item then
+        self.touched[item] = now()
+    end
     if not since then
         return pts
     end
@@ -87,15 +127,21 @@ function methods:save()
     if not self.path then
         return false
     end
+    if not self.dirty and fs.exists(self.path) then
+        return true
+    end
+    pruneSeriesKeys(self)
     local file = fs.open(self.path, "w")
     if not file then
         return false
     end
     file.write(textutils.serialize({
         retain = self.retain,
+        max_series = self.max_series,
         series = self.series,
     }))
     file.close()
+    self.dirty = false
     return true
 end
 
@@ -115,9 +161,20 @@ function methods:load()
     if data.retain then
         self.retain = data.retain
     end
-    for item in pairs(self.series) do
+    if data.max_series then
+        self.max_series = data.max_series
+    end
+    self.touched = {}
+    for item, pts in pairs(self.series) do
+        local lastT = 0
+        if type(pts) == "table" and #pts > 0 then
+            lastT = pts[#pts].t or 0
+        end
+        self.touched[item] = lastT
         prune(self, item)
     end
+    pruneSeriesKeys(self)
+    self.dirty = false
     return true
 end
 
@@ -125,8 +182,11 @@ function history.new(opts)
     opts = opts or {}
     local self = {
         retain = opts.retain or DEFAULT_RETAIN,
+        max_series = opts.max_series or DEFAULT_MAX_SERIES,
         path = opts.path,
         series = {},
+        touched = {},
+        dirty = false,
     }
     for k, v in pairs(methods) do
         self[k] = v

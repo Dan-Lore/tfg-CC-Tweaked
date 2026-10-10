@@ -85,9 +85,14 @@ local function itemTagsFromDetail(detail)
     return nil
 end
 
---- Detail for #tags (match + spoil). Exact ids stay fast (list only) until food spoil path enabled.
-local function slotDetail(inv, slot, itemQuery, _itemName)
-    if not transfer.isTag(itemQuery) or not inv.getItemDetail then
+--- Detail for #tags, or exact food ids when food module registered (spoil filter).
+local function slotDetail(inv, slot, itemQuery, itemName)
+    if not inv.getItemDetail then
+        return nil
+    end
+    local need = transfer.isTag(itemQuery)
+        or (itemName and transfer.isFoodItem(itemName))
+    if not need then
         return nil
     end
     local ok, detail = pcall(inv.getItemDetail, slot)

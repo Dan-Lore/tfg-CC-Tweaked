@@ -9,6 +9,7 @@ package.path = package.path
 local configMod = require("config")
 local discover = require("discover")
 local move = require("move")
+local net_watch = require("net_watch")
 
 local config = configMod.load()
 local N = tonumber(config.N) or 0
@@ -54,25 +55,13 @@ end
 
 --- Drop everything currently queued (boot peripheral attaches, etc.).
 local function flushEvents()
-    os.queueEvent("ae2_feed_flush")
-    while true do
-        local ev = os.pullEvent()
-        if ev == "ae2_feed_flush" then
-            return
-        end
-    end
+    net_watch.flushEvents("ae2_feed_flush")
 end
 
 --- Yield one tick and note any hotplug that arrived.
 local function yieldAndWatch()
-    local timer = os.startTimer(0)
-    while true do
-        local ev, p1 = os.pullEvent()
-        if ev == "timer" and p1 == timer then
-            return
-        elseif ev == "peripheral" or ev == "peripheral_detach" then
-            dirty = true
-        end
+    if net_watch.sleepWatch(0) then
+        dirty = true
     end
 end
 

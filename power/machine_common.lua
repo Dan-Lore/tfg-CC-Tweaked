@@ -1,13 +1,11 @@
 -- Shared CC peripheral helpers for power generators.
 
+local net_watch = require("net_watch")
+
 local M = {}
 
 function M.safeCall(name, method, ...)
-    local ok, a, b, c = pcall(peripheral.call, name, method, ...)
-    if not ok then
-        return nil
-    end
-    return a, b, c
+    return net_watch.safeCall(name, method, ...)
 end
 
 function M.indexFromName(name)

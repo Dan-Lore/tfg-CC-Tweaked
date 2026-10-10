@@ -1,13 +1,11 @@
 -- Product tank discovery + capacity / readTank (CC: Tweaked / TFG).
 
+local net_watch = require("net_watch")
+
 local M = {}
 
 local function safeCall(name, method, ...)
-    local ok, a, b, c = pcall(peripheral.call, name, method, ...)
-    if not ok then
-        return nil
-    end
-    return a, b, c
+    return net_watch.safeCall(name, method, ...)
 end
 
 local function indexFromName(name)

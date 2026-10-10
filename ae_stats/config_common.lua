@@ -1,61 +1,13 @@
--- Shared key|value cfg helpers for ae_stats.
+-- Shared key|value cfg helpers for ae_stats (thin wrap over shared/cfg_pipe).
 
 local util = require("util")
+local cfg_pipe = require("cfg_pipe")
 
 local config_common = {}
 
-function config_common.parseScale(raw)
-    raw = util.trim(tostring(raw or "")):lower()
-    if raw == "" or raw == "auto" then
-        return "auto"
-    end
-    local n = tonumber(raw)
-    if not n then
-        return "auto"
-    end
-    n = math.floor(n * 2 + 0.5) / 2
-    return util.clamp(n, 0.5, 5)
-end
-
-function config_common.splitLine(line)
-    line = util.trim(line or "")
-    if line == "" or line:sub(1, 1) == "#" then
-        return nil
-    end
-    local parts = util.split(line, "|")
-    for i = 1, #parts do
-        parts[i] = util.trim(parts[i])
-    end
-    local key = (parts[1] or ""):lower()
-    if key == "" then
-        return nil, "empty key"
-    end
-    if parts[2] == nil or parts[2] == "" then
-        return nil, key .. " | value"
-    end
-    return key, parts[2], parts
-end
-
-function config_common.loadLines(path, defaultName)
-    path = util.resolvePath(path, defaultName)
-    if not fs.exists(path) then
-        return nil, path, false
-    end
-    local file = fs.open(path, "r")
-    if not file then
-        error("Cannot open " .. path, 2)
-    end
-    local lines = {}
-    while true do
-        local line = file.readLine()
-        if not line then
-            break
-        end
-        lines[#lines + 1] = line
-    end
-    file.close()
-    return lines, path, true
-end
+config_common.parseScale = cfg_pipe.parseScale
+config_common.splitLine = cfg_pipe.splitLine
+config_common.loadLines = cfg_pipe.loadLines
 
 --- Track id: "item|<name>" or "fluid|<name>"
 function config_common.trackId(kind, name)

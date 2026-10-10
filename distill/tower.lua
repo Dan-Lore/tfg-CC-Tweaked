@@ -1,13 +1,11 @@
 -- Distillation tower discovery + enable/disable (CC: Tweaked / TFG).
 
+local net_watch = require("net_watch")
+
 local M = {}
 
 local function safeCall(name, method, ...)
-    local ok, a, b, c = pcall(peripheral.call, name, method, ...)
-    if not ok then
-        return nil
-    end
-    return a, b, c
+    return net_watch.safeCall(name, method, ...)
 end
 
 --- Find tower by pinned name or substr. Returns wrap, name.

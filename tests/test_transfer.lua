@@ -75,19 +75,23 @@ A.suite("transfer", {
         end,
     },
     {
-        name = "characterization: exact id does not consult spoil (list only)",
+        name = "exact food id skips spoiled stacks",
         fn = function()
-            -- Current behavior (Phase 0): exact ids skip getItemDetail, so rotten counts.
             local inv = T.stub.makeInventory({
                 [1] = {
                     name = "firmalife:food/cooked_pizza",
                     count = 4,
                     detail = { name = "firmalife:food/cooked_pizza", rotten = true },
                 },
+                [2] = {
+                    name = "firmalife:food/cooked_pizza",
+                    count = 2,
+                    detail = { name = "firmalife:food/cooked_pizza" },
+                },
             })
             T.stub.addPeripheral("fridge2", inv)
             local n = transfer.countItem("fridge2", "firmalife:food/cooked_pizza")
-            A.eq(n, 4, "Phase0: exact id ignores spoil")
+            A.eq(n, 2, "rotten pizza excluded when food module registered")
         end,
     },
     {

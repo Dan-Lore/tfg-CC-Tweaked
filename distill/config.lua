@@ -1,6 +1,8 @@
 -- Load distill.cfg (defaults if file missing).
+-- `config` is project-local (distill/); deploy one bundle per computer.
 
 local util = require("util")
+local cfg_pipe = require("cfg_pipe")
 
 local config = {}
 
@@ -176,26 +178,14 @@ end
 --- Load distill.cfg next to the program; missing file → defaults.
 function config.load(path)
     local cfg = defaults()
-    path = util.resolvePath(path, "distill.cfg")
-    if not fs.exists(path) then
-        return cfg, path, false
+    local lines, resolved, ok = cfg_pipe.loadLines(path, "distill.cfg")
+    if not ok then
+        return cfg, resolved, false
     end
-
-    local file = fs.open(path, "r")
-    if not file then
-        error("Cannot open " .. path, 2)
+    for n = 1, #lines do
+        parseLine(cfg, lines[n], n)
     end
-    local n = 0
-    while true do
-        local line = file.readLine()
-        if not line then
-            break
-        end
-        n = n + 1
-        parseLine(cfg, line, n)
-    end
-    file.close()
-    return cfg, path, true
+    return cfg, resolved, true
 end
 
 return config

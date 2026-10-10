@@ -1,5 +1,10 @@
--- Exclusive peripheral locks shared across craft / miller on the same computer.
+-- Exclusive peripheral locks shared across craft / miller on the SAME computer.
 -- Same recipeKey can queue (stack); different crafts wait for the machine to free.
+--
+-- CONTRACT: locks are in-process only. Scripts on other computers
+-- (pizza_maintain, greenhouse_clean, craft_ui, wheat_grain, …) are NOT
+-- coordinated. Run conflicting craft entrypoints on one CC computer, or
+-- accept possible peripheral races across the wired network.
 
 local machine_lock = {}
 

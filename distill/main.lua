@@ -10,6 +10,7 @@ local configMod = require("config")
 local towerMod = require("tower")
 local tanksMod = require("tanks")
 local ui = require("ui")
+local net_watch = require("net_watch")
 
 local cfg, cfgPath, cfgLoaded = configMod.load()
 
@@ -31,26 +32,15 @@ local function networkSummary()
 end
 
 local function flushEvents()
-    os.queueEvent("distill_ctrl_flush")
-    while true do
-        local ev = os.pullEvent()
-        if ev == "distill_ctrl_flush" then
-            return
-        end
-    end
+    net_watch.flushEvents("distill_ctrl_flush")
 end
 
 local function sleepWatch(seconds)
-    local timer = os.startTimer(seconds)
-    while true do
-        local ev, p1 = os.pullEvent()
-        if ev == "timer" and p1 == timer then
-            return false
-        elseif ev == "peripheral" or ev == "peripheral_detach" then
-            netDirty = true
-            return true
-        end
+    local dirty = net_watch.sleepWatch(seconds)
+    if dirty then
+        netDirty = true
     end
+    return dirty
 end
 
 local function shortFluid(name, maxLen)

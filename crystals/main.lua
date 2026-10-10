@@ -13,6 +13,7 @@ local feed = require("feed")
 local sort = require("sort")
 local ui = require("ui")
 local gems = require("gems")
+local net_watch = require("net_watch")
 
 local config = configMod.load()
 if config.ALIASES then
@@ -100,26 +101,15 @@ local function ensureNet()
 end
 
 local function flushEvents()
-    os.queueEvent("crystals_flush")
-    while true do
-        local ev = os.pullEvent()
-        if ev == "crystals_flush" then
-            return
-        end
-    end
+    net_watch.flushEvents("crystals_flush")
 end
 
+--- Sleep full duration; note hotplug but do not wake early (avoid rescan storms).
 local function sleepWatch(seconds)
-    local timer = os.startTimer(seconds)
-    while true do
-        local ev, p1 = os.pullEvent()
-        if ev == "timer" and p1 == timer then
-            return false
-        elseif ev == "peripheral" or ev == "peripheral_detach" then
-            dirty = true
-            -- Do not wake early into a rescan storm; finish the sleep.
-        end
-    end
+    net_watch.sleepDrain(seconds, function()
+        dirty = true
+    end)
+    return false
 end
 
 local function countPairs(stock)

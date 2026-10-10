@@ -1,6 +1,8 @@
 -- Load crystals.cfg from disk (next to the running program).
+-- `config` is project-local (crystals/); deploy one bundle per computer.
 
 local util = require("util")
+local cfg_pipe = require("cfg_pipe")
 
 local config = {}
 
@@ -163,31 +165,13 @@ local function parseText(text, label)
     return finalize(cfg)
 end
 
-local function readFileText(path)
-    local file = fs.open(path, "r")
-    if not file then
-        return nil
-    end
-    local chunks = {}
-    while true do
-        local line = file.readLine()
-        if not line then
-            break
-        end
-        chunks[#chunks + 1] = line
-    end
-    file.close()
-    return table.concat(chunks, "\n")
-end
-
 --- crystals.cfg is required next to the program (not embedded).
 function config.load(path)
-    path = util.resolvePath(path, "crystals.cfg")
-    local fileText = readFileText(path)
-    if not fileText then
-        error("Cannot open " .. path .. " (copy crystals.cfg next to crystals.lua)", 2)
+    local lines, resolved, ok = cfg_pipe.loadLines(path, "crystals.cfg")
+    if not ok then
+        error("Cannot open " .. tostring(resolved) .. " (copy crystals.cfg next to crystals.lua)", 2)
     end
-    return parseText(fileText, path)
+    return parseText(table.concat(lines, "\n"), resolved)
 end
 
 return config
