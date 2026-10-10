@@ -37,15 +37,29 @@ end
 
 A.suite("craft_io", {
     {
-        name = "buildNeedMap only counts item outputs (Phase0)",
+        name = "buildNeedMap counts item and fluid outputs",
         fn = function()
-            local need, anyItem = craft_io.buildNeedMap({
+            local need, anyItem, fluidKeys, anyFluid = craft_io.buildNeedMap({
                 { name = "item/a", count = 2, fluid = false },
                 { name = "fluid/b", count = 100, fluid = true },
             }, 3)
             A.truthy(anyItem)
+            A.truthy(anyFluid)
             A.eq(need["item/a"], 6)
-            A.isNil(need["fluid/b"], "Phase0: fluid outputs ignored in need map")
+            A.eq(need["fluid/b"], 300)
+            A.truthy(fluidKeys["fluid/b"])
+            A.falsy(fluidKeys["item/a"])
+        end,
+    },
+    {
+        name = "rollbackFluids returns fluid to source tank",
+        fn = function()
+            local store = loadStore()
+            local machine = peripheral.wrap("machine")
+            machine._receiveFluid("minecraft:water", 100)
+            craft_io.rollbackFluids("machine", { ["#tfg:clean_water"] = 100 }, store)
+            A.eq(transfer.countFluid("water_tank", "minecraft:water"), 1100)
+            A.eq(transfer.countFluid("machine", "minecraft:water"), 0)
         end,
     },
     {

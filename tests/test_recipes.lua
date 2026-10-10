@@ -101,4 +101,26 @@ A.suite("recipes", {
             A.eq(recipes.recipeKey(r), "m_2|out/item")
         end,
     },
+    {
+        name = "findDuplicateOutputs and warn on load",
+        fn = function()
+            local warnings = {}
+            recipes.warn = function(msg)
+                warnings[#warnings + 1] = msg
+            end
+            T.stub.setRunningProgram("/tests/program.lua")
+            T.stub.writeFile("/tests/recipes.cfg", [[
+m_a_1 | x 1 | shared/out 1 | processing
+m_b_1 | y 1 | shared/out 1 | processing
+m_c_1 | z 1 | unique/out 1 | processing
+]])
+            local list = recipes.load("recipes.cfg")
+            A.eq(#list, 3)
+            local dups = recipes.findDuplicateOutputs(list)
+            A.eq(#dups["shared/out"], 2)
+            A.isNil(dups["unique/out"])
+            A.eq(#warnings, 1)
+            A.truthy(warnings[1]:find("shared/out", 1, true))
+        end,
+    },
 })

@@ -4,6 +4,7 @@ local T = boot()
 local A = T.assert
 
 local transfer = require("transfer")
+require("food") -- register craft food tag/spoil helpers
 
 A.suite("transfer", {
     {

@@ -1,5 +1,6 @@
 -- Greenhouse grow: pulse machine, wait for output bus, pull products.
 
+require("food")
 local transfer = require("transfer")
 local recipes = require("recipes")
 local greenhouse = require("greenhouse")

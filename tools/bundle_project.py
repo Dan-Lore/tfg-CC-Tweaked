@@ -5,6 +5,7 @@ Usage:
   python tools/bundle_project.py ae2_feed
   python tools/bundle_project.py crystals
   python tools/bundle_project.py power
+  python tools/bundle_project.py distill
   python tools/bundle_project.py ae_stats sampler
   python tools/bundle_project.py ae_stats display
   python tools/bundle_project.py ae_stats graphview
@@ -39,8 +40,13 @@ PACKAGE_PATH_RE = re.compile(
 
 # Lazy requires that static scan of the entry may miss (nested in functions).
 EXTRA_REQUIRES: dict[str, tuple[str, ...]] = {
-    "craft": ("storage",),
-    "greenhouse_clean": ("greenhouse",),
+    "craft": ("storage", "food"),
+    "greenhouse_clean": ("greenhouse", "food"),
+    "craft_io": ("food",),
+    "craft_stock": ("food",),
+    "craft_grow": ("food",),
+    "pizza_maintain": ("food",),
+    "wheat_grain": ("food",),
 }
 
 CRAFT_CFG_HINT = (
@@ -56,6 +62,9 @@ CRYSTALS_CFG_HINT = (
 POWER_CFG_HINT = (
     "-- Also copy power.cfg next to this file on the computer."
 )
+DISTILL_CFG_HINT = (
+    "-- Also copy distill.cfg next to this file on the computer."
+)
 AE_STATS_CFG_HINT = (
     "-- Also copy the matching .cfg next to this file "
     "(sampler.cfg / display.cfg / graphview.cfg; "
@@ -70,6 +79,7 @@ COPY_CFG: dict[str, str] = {
     "crystals": "crystals.cfg",
     "ae2_feed": "ae2_feed.cfg",
     "power": "power.cfg",
+    "distill": "distill.cfg",
 }
 
 # project -> entry -> cfg filename (copied to dist/<cfg>).
@@ -203,6 +213,8 @@ def build_bundle(
         parts.append(CRYSTALS_CFG_HINT + "\n")
     elif project == "power":
         parts.append(POWER_CFG_HINT + "\n")
+    elif project == "distill":
+        parts.append(DISTILL_CFG_HINT + "\n")
     elif project == "ae_stats":
         parts.append(AE_STATS_CFG_HINT + "\n")
     parts.append("-- Generated package.preload modules + entrypoint.\n\n")
@@ -300,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
         out_name = "crystals"
     elif project == "power" and entry == "main":
         out_name = "power"
+    elif project == "distill" and entry == "main":
+        out_name = "distill"
     else:
         out_name = entry
     out_dir = REPO_ROOT / "dist"

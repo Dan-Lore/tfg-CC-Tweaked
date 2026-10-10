@@ -1,6 +1,7 @@
 -- Public craft API: load/find recipes, run processing, request with realtime monitor.
 -- Internals: craft_plan, craft_monitor, craft_stock, craft_io, craft_grow, machine_lock.
 
+require("food") -- tag/spoil registration for transfer
 local recipes = require("recipes")
 local peripherals = require("peripherals")
 local craft_io = require("craft_io")
