@@ -4,6 +4,7 @@
 require("food") -- register tag/spoil helpers into transfer
 local transfer = require("transfer")
 local craft_stock = require("craft_stock")
+local craft_err = require("craft_err")
 
 local craft_io = {}
 
@@ -272,7 +273,9 @@ function craft_io.run(recipe, opts)
     assert(from and out, "opts.from/opts.out or opts.store required")
 
     if recipe.flag == "grow" then
-        return false, "use craft.request for grow recipes"
+        return craft_err.fail("use_request", {
+            message = "use craft.request for grow recipes",
+        })
     end
 
     local times = math.max(1, math.floor(tonumber(opts.times) or 1))

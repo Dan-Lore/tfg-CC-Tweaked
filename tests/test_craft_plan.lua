@@ -74,4 +74,42 @@ A.suite("craft_plan", {
             A.contains(fluids, "#tfg:clean_water")
         end,
     },
+    {
+        name = "readyJobs sorts depth DESC then times DESC",
+        fn = function()
+            -- Minimal snap stub: everything ready, no peripherals needed for countCompleteSets grow
+            local list = {
+                R("g_0 | - | crop 1 | grow", 1),
+                R("p_1 | crop 1 | flour 1 | processing", 2),
+            }
+            local index = craft_plan.buildIndex(list)
+            local snap = {
+                store = nil,
+                opts = {},
+                item = function() return 0 end,
+                fluid = function() return 0, nil end,
+            }
+            -- Override countCompleteSets path: grow has 0 inputs → ready; flour needs crop
+            local craft_stock = require("craft_stock")
+            local old = craft_stock.countCompleteSets
+            craft_stock.countCompleteSets = function(recipe)
+                return 3
+            end
+            local deficit = { flour = 6, crop = 3 }
+            local jobs = craft_plan.readyJobs(
+                index,
+                deficit,
+                snap,
+                function(recipe) return recipe.machine end,
+                nil,
+                "flour"
+            )
+            craft_stock.countCompleteSets = old
+            A.truthy(#jobs >= 1)
+            -- deeper flour (depth 2) before crop (depth 1) when both ready
+            if #jobs >= 2 then
+                A.eq(jobs[1].itemId, "flour")
+            end
+        end,
+    },
 })

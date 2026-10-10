@@ -19,7 +19,6 @@ COPY_CFG copies a single .cfg next to the bundle.
 COPY_CFG_BY_ENTRY copies <entry>.cfg for multi-entry projects.
 MERGE_CFG merges several source .cfg files into dist/<entry>.cfg
 (e.g. craft pizza_maintain → pizza_maintain.lua + pizza_maintain.cfg).
-Projects in EMBED_CFG bake <project>/*.cfg into the bundle as cfg_embed.
 """
 
 from __future__ import annotations
@@ -70,9 +69,6 @@ AE_STATS_CFG_HINT = (
     "(sampler.cfg / display.cfg / graphview.cfg; "
     "display+graphview also need labels.cfg)."
 )
-
-# Projects that embed <project>/<name>.cfg as package.preload["cfg_embed"].
-EMBED_CFG: dict[str, str] = {}
 
 # Copy <project>/<name>.cfg next to the bundle in dist/.
 COPY_CFG: dict[str, str] = {
@@ -163,34 +159,8 @@ def topo_modules(
     return ordered
 
 
-def lua_long_string(text: str) -> str:
-    """Wrap text in a Lua long bracket string that cannot appear inside it."""
-    eq = 0
-    while True:
-        open_b = "[" + ("=" * eq) + "["
-        close_b = "]" + ("=" * eq) + "]"
-        if open_b not in text and close_b not in text:
-            return open_b + text + close_b
-        eq += 1
-
-
-def wrap_cfg_embed(cfg_text: str) -> str:
-    body = cfg_text.replace("\r\n", "\n").replace("\r", "\n")
-    if not body.endswith("\n"):
-        body += "\n"
-    parts: list[str] = []
-    parts.append("-- >>> EDIT CONFIG (crystals.cfg syntax) <<<\n")
-    parts.append(f"local EMBEDDED_CFG = {lua_long_string(body)}\n\n")
-    parts.append('package.preload["cfg_embed"] = function()\n')
-    parts.append("    return EMBEDDED_CFG\n")
-    parts.append("end\n\n")
-    return "".join(parts)
-
-
-def wrap_preload(name: str, src: str, mark_config: bool) -> str:
+def wrap_preload(name: str, src: str) -> str:
     parts: list[str] = [f'package.preload["{name}"] = function(...)\n']
-    if mark_config and name == "config":
-        parts.append("-- >>> EDIT CONFIG HERE (e.g. N) <<<\n")
     parts.append(src.rstrip() + "\n")
     parts.append("end\n")
     return "".join(parts)
@@ -201,7 +171,6 @@ def build_bundle(
     entry: str,
     modules: OrderedDict[str, Path],
     entry_src: str,
-    embed_cfg_path: Path | None = None,
 ) -> str:
     parts: list[str] = []
     parts.append(f"-- Bundled from {project}/{entry}.lua — do not edit by hand; rebuild with tools/bundle_project.py\n")
@@ -219,13 +188,10 @@ def build_bundle(
         parts.append(AE_STATS_CFG_HINT + "\n")
     parts.append("-- Generated package.preload modules + entrypoint.\n\n")
 
-    if embed_cfg_path is not None and embed_cfg_path.is_file():
-        parts.append(wrap_cfg_embed(read_text(embed_cfg_path)))
-
     for name, path in modules.items():
         src = read_text(path)
         parts.append(f"-- module: {name} ({path.relative_to(REPO_ROOT).as_posix()})\n")
-        parts.append(wrap_preload(name, src, mark_config=False))
+        parts.append(wrap_preload(name, src))
         parts.append("\n")
 
     entry_body = strip_package_path(entry_src)
@@ -297,14 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     entry_src = read_text(entry_path)
     modules = topo_modules(entry, entry_src, project_dir, shared_dir)
 
-    embed_cfg_path = None
-    cfg_name = EMBED_CFG.get(project)
-    if cfg_name:
-        candidate = project_dir / cfg_name
-        if candidate.is_file():
-            embed_cfg_path = candidate
-
-    bundle = build_bundle(project, entry, modules, entry_src, embed_cfg_path)
+    bundle = build_bundle(project, entry, modules, entry_src)
 
     if project == "ae2_feed" and entry == "main":
         out_name = "ae2_feed"
@@ -324,8 +283,6 @@ def main(argv: list[str] | None = None) -> int:
     mod_list = ", ".join(modules.keys()) or "(none)"
     print(f"Wrote {out_path.relative_to(REPO_ROOT).as_posix()}")
     print(f"  modules: {mod_list}")
-    if embed_cfg_path is not None:
-        print(f"  embedded config: {embed_cfg_path.relative_to(REPO_ROOT).as_posix()}")
 
     sources = MERGE_CFG.get(project)
     if sources:

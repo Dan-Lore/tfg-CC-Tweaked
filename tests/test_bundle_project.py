@@ -86,3 +86,16 @@ def test_circular_require_detected(bundler, tmp_path):
             proj,
             shared,
         )
+
+
+def test_check_requires_all_entries():
+    import subprocess
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "check_requires.py")],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "All entry requires" in proc.stdout

@@ -253,23 +253,25 @@ function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMach
     local candidates = {}
 
     for itemId, still in pairs(deficit) do
-        if still and still > 0 then
+        sleep(0) -- yield while scanning candidates
+        if not still or still <= 0 then
+            -- skip
+        else
             local entry = index.byOutput[itemId]
-            if entry then
-                local recipe = entry.recipe
-                local outStack = entry.outStack
-                local per = outStack.count
-                if per and per > 0 then
+            local recipe = entry and entry.recipe
+            local outStack = entry and entry.outStack
+            local per = outStack and outStack.count
+            if entry and per and per > 0 then
                 local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
                 if ready >= 1 then
                     local machine = resolveMachine(recipe)
                     sleep(0)
                     local recipeKey = recipes.recipeKey(recipe)
-                        local reserved = reservedMachines and reservedMachines[machine]
-                        local okMachine = machine
-                            and machine_lock.canStack(machine, recipeKey)
-                            and (not reserved or reserved == recipeKey)
-                        if okMachine then
+                    local reserved = reservedMachines and reservedMachines[machine]
+                    local okMachine = machine
+                        and machine_lock.canStack(machine, recipeKey)
+                        and (not reserved or reserved == recipeKey)
+                    if okMachine then
                         local runsWanted = math.ceil(still / per)
                         local times = batchTimes(recipe, ready, runsWanted)
                         local have = snap.item(itemId)
@@ -291,12 +293,10 @@ function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMach
                             deficit = still,
                             wantUnits = wantUnits,
                         }
-                        end
                     end
                 end
             end
         end
-        sleep(0) -- yield while scanning candidates
     end
 
     table.sort(candidates, function(a, b)
