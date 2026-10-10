@@ -34,12 +34,8 @@ function craft_io.pullItemAmount(from, itemName, amount, store, fallbackOut, rec
     if dest and dest ~= from and peripheral.isPresent(from) then
         n = transfer(from, dest, itemName, amount)
     end
-    if store and n < amount then
-        local overflow = store.overflow()
-        if overflow and overflow ~= dest and overflow ~= from and peripheral.isPresent(overflow) then
-            n = n + transfer(from, overflow, itemName, amount - n)
-        end
-    end
+    -- No spill of fridge food into the room-temp overflow crate.
+    -- Overflow is only used when destFor already points there (e.g. basil leaves).
     return n
 end
 

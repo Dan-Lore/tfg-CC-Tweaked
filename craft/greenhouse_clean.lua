@@ -43,7 +43,9 @@ local function destForItem(store, growRecipes, itemName)
     return store.destFor(itemName)
 end
 
-local function moveWithOverflow(store, from, dest, itemName)
+--- Move to dest. Spill into overflow ONLY if that item's configured home is overflow
+-- (basil leaves). Never dump perishable fridge food into a bronze crate.
+local function moveToDest(store, from, dest, itemName)
     local before = transfer.countItem(from, itemName)
     if before <= 0 then
         return 0
@@ -55,15 +57,22 @@ local function moveWithOverflow(store, from, dest, itemName)
     local moved = transfer(from, dest, itemName, -1)
     local left = transfer.countItem(from, itemName)
     local overflow = store.overflow()
+    local home = store.destFor(itemName)
 
-    if left > 0 and overflow and dest ~= overflow and peripheral.isPresent(overflow) then
+    if left > 0 and overflow and home == overflow and dest ~= overflow
+        and peripheral.isPresent(overflow)
+    then
         local buffered = transfer(from, overflow, itemName, -1)
         if buffered > 0 then
-            print(("overflow: %s x%s -> %s (dest full: %s)"):format(
-                util.short(itemName), tostring(buffered), util.short(overflow), util.short(dest)
+            print(("overflow: %s x%s -> %s"):format(
+                util.short(itemName), tostring(buffered), util.short(overflow)
             ))
         end
         moved = moved + buffered
+    elseif left > 0 and dest ~= overflow then
+        print(("dest full, kept: %s x%s (no crate dump)"):format(
+            util.short(itemName), tostring(left)
+        ))
     end
 
     return moved
@@ -126,7 +135,7 @@ local function cleanGreenhouse(store, growRecipes, recipe)
             seen[name] = true
             local dest = destForItem(store, growRecipes, name)
             if dest and peripheral.isPresent(dest) then
-                moveWithOverflow(store, source, dest, name)
+                moveToDest(store, source, dest, name)
             elseif dest then
                 print(("missing dest %s for %s"):format(tostring(dest), util.short(name)))
             end

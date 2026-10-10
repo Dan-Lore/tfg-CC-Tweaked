@@ -146,7 +146,9 @@ function storage.load(path)
     end
 
     --- Ordered unique inventories used for both counting and pulling an item.
-    -- Order: explicit source, destFor, main, overflow (flora only if already listed).
+    -- Order: explicit source → dest/route → main.
+    -- Overflow crate is included ONLY when it is that item's home (route/source),
+    -- never as a dump for fridge food (pizza etc. rot at room temp).
     function cfg.pullSources(itemId, extra)
         local seen = {}
         local list = {}
@@ -160,7 +162,10 @@ function storage.load(path)
         add(cfg.sources[itemId]) -- explicit source only (not default main yet)
         add(cfg.destFor(itemId))
         add(cfg.named.main)
-        add(cfg.named.overflow)
+        local overflow = cfg.named.overflow
+        if overflow and (cfg.sources[itemId] == overflow or cfg.destFor(itemId) == overflow) then
+            add(overflow)
+        end
         if extra then
             if type(extra) == "string" then
                 add(extra)
