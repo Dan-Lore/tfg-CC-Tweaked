@@ -1,2 +1,6 @@
 dist/
 *backup*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
