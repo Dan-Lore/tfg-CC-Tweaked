@@ -1,6 +1,8 @@
 -- Load power.cfg (defaults if file missing).
+-- `config` is project-local (power/); deploy one bundle per computer.
 
 local util = require("util")
+local cfg_pipe = require("cfg_pipe")
 
 local config = {}
 
@@ -40,19 +42,7 @@ local function defaults()
     }
 end
 
-local function parseScale(raw)
-    raw = util.trim(tostring(raw or "")):lower()
-    if raw == "" or raw == "auto" then
-        return "auto"
-    end
-    local n = tonumber(raw)
-    if not n then
-        return "auto"
-    end
-    -- CC monitors accept 0.5 .. 5.0 in 0.5 steps
-    n = math.floor(n * 2 + 0.5) / 2
-    return util.clamp(n, 0.5, 5)
-end
+local parseScale = cfg_pipe.parseScale
 
 local function setNumber(cfg, key, raw, lineNo)
     local n = tonumber(raw)
@@ -144,26 +134,14 @@ end
 --- Load power.cfg next to the program; missing file → defaults.
 function config.load(path)
     local cfg = defaults()
-    path = util.resolvePath(path, "power.cfg")
-    if not fs.exists(path) then
-        return cfg, path, false
+    local lines, resolved, ok = cfg_pipe.loadLines(path, "power.cfg")
+    if not ok then
+        return cfg, resolved, false
     end
-
-    local file = fs.open(path, "r")
-    if not file then
-        error("Cannot open " .. path, 2)
+    for n = 1, #lines do
+        parseLine(cfg, lines[n], n)
     end
-    local n = 0
-    while true do
-        local line = file.readLine()
-        if not line then
-            break
-        end
-        n = n + 1
-        parseLine(cfg, line, n)
-    end
-    file.close()
-    return cfg, path, true
+    return cfg, resolved, true
 end
 
 return config

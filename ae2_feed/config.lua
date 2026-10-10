@@ -1,6 +1,8 @@
 -- Load ae2_feed.cfg into the table discover/main expect.
+-- `config` is project-local (ae2_feed/); deploy one bundle per computer.
 
 local util = require("util")
+local cfg_pipe = require("cfg_pipe")
 
 local config = {}
 
@@ -82,23 +84,15 @@ end
 
 --- Load ae2_feed.cfg (next to the running program by default).
 function config.load(path)
-    path = util.resolvePath(path, "ae2_feed.cfg")
-    local file = fs.open(path, "r")
-    if not file then
-        error("Cannot open " .. path, 2)
+    local lines, resolved, ok = cfg_pipe.loadLines(path, "ae2_feed.cfg")
+    if not ok then
+        error("Cannot open " .. tostring(resolved), 2)
     end
 
     local cfg = empty()
-    local n = 0
-    while true do
-        local line = file.readLine()
-        if not line then
-            break
-        end
-        n = n + 1
-        parseLine(cfg, line, n)
+    for n = 1, #lines do
+        parseLine(cfg, lines[n], n)
     end
-    file.close()
 
     -- Single needle → string (discover accepts string or list).
     if cfg.STORAGE_SUBSTR and #cfg.STORAGE_SUBSTR == 1 then

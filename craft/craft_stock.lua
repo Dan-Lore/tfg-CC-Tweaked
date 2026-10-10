@@ -1,6 +1,7 @@
 -- Stock counting and recipe input availability (count == pull sources).
 -- Snapshots scan each inventory once per tick (with yields) instead of per-item.
 
+require("food")
 local transfer = require("transfer")
 
 local craft_stock = {}

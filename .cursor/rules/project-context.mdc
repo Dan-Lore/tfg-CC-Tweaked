@@ -29,3 +29,6 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - Fluids use `fluid_source | tagOrFluid | tank | concreteFluid` in `storage.cfg` (e.g. `#tfg:clean_water` → `gtceu:lv_super_tank_1` / `minecraft:water`); craft refuses to start if any input (item or fluid) is missing
 - Processing crafts in batches (`times=N` one push); while waiting, continuously drain machine outputs so GT slots never fill/stall; sibling inputs run in parallel with a per-machine lock; UI amount ±1/±10 (1–100)
 - `pizza_maintain.lua` keeps `firmalife:food/cooked_pizza` at `pizza_target` (default 16) via `craft.request`; `pizza_interval` between polls; run `bg pizza_maintain.lua`
+- `machine_lock` is **in-process only** (one CC computer). `pizza_maintain` / `greenhouse_clean` / `craft_ui` / `wheat_grain` on different computers do not share locks
+- Each project’s `config.lua` is **project-local**; deploy one bundled entry per computer (do not mix multiple project `config` modules on one machine)
+- Shared helpers: `shared/cfg_pipe.lua` (pipe cfg load), `shared/net_watch.lua` (hotplug/sleep), `craft/food.lua` (tag/spoil registration into `transfer`)

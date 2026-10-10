@@ -58,15 +58,15 @@ end
 local function millOnce(store, recipe, opts, batch)
     local have = craft_stock.countAvailable(store, WHEAT, opts)
     if have < 1 then
-        return false, "no_wheat"
+        return false, { error = "no_wheat", skipped = true }
     end
 
     local machine = craft.resolveMachine(recipe)
     if not machine then
-        return false, "no_machine"
+        return false, { error = "no_machine" }
     end
     if machine_lock.isBusy(machine) then
-        return false, "busy"
+        return false, { error = "busy" }
     end
 
     local times = math.min(have, batch)
@@ -131,11 +131,11 @@ local function main()
                 got = times or 0
             end
             print(("milled x%s -> %s"):format(tostring(got), util.short(GRAIN)))
-        elseif detail == "no_wheat" or (type(detail) == "table" and detail.skipped) then
+        elseif type(detail) == "table" and (detail.error == "no_wheat" or detail.skipped) then
             sleep(interval)
-        elseif detail == "busy" or (type(detail) == "table" and detail.error == "busy") then
+        elseif type(detail) == "table" and detail.error == "busy" then
             sleep(1)
-        elseif detail == "no_machine" then
+        elseif type(detail) == "table" and detail.error == "no_machine" then
             print("wheat_grain: machine not on network, retrying...")
             sleep(interval)
         else

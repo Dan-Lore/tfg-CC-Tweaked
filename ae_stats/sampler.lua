@@ -21,6 +21,7 @@ local function defaults()
         sample_interval = 30,
         retain_hours = 2.5,
         persist_every = 60,
+        max_series = 512,
     }
 end
 
@@ -42,6 +43,8 @@ local function loadConfig()
             cfg.retain_hours = tonumber(val) or cfg.retain_hours
         elseif key == "persist_every" then
             cfg.persist_every = tonumber(val) or cfg.persist_every
+        elseif key == "max_series" then
+            cfg.max_series = tonumber(val) or cfg.max_series
         elseif key == "watchlist" or key == "track" then
             -- ignored: sampler records every AE resource
         elseif key then
@@ -55,6 +58,7 @@ local cfg = loadConfig()
 
 local hist = history.new({
     retain = cfg.retain_hours * 3600,
+    max_series = cfg.max_series,
     path = util.resolvePath(nil, "ae_stats_hist"),
 })
 hist:load()

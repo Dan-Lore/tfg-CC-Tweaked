@@ -1,12 +1,14 @@
 -- Public craft API: load/find recipes, run processing, request with realtime monitor.
 -- Internals: craft_plan, craft_monitor, craft_stock, craft_io, craft_grow, machine_lock.
 
+require("food") -- tag/spoil registration for transfer
 local recipes = require("recipes")
 local peripherals = require("peripherals")
 local craft_io = require("craft_io")
 local craft_grow = require("craft_grow")
 local craft_monitor = require("craft_monitor")
 local machine_lock = require("machine_lock")
+local craft_err = require("craft_err")
 
 local craft = {}
 
@@ -106,7 +108,10 @@ function craft.once(machine, opts)
     local list = craft.load(opts and opts.cfg)
     local recipe = craft.find(list, machine, opts and opts.wantOutput)
     if not recipe then
-        return false, "no recipe for " .. tostring(machine)
+        return craft_err.fail("no_recipe", {
+            missing = { name = tostring(machine), count = 1 },
+            message = "no recipe for " .. tostring(machine),
+        })
     end
     return craft.run(recipe, opts)
 end

@@ -1,60 +1,26 @@
 -- Item and fluid transfers between peripherals.
 -- Item queries: exact id, or #namespace:path (item tag via getItemDetail / fallbacks).
+-- Domain food/spoil/tag fallbacks are registered by craft/food.lua (optional).
 
 local transfer = {}
 
--- Helpers defined BEFORE the table — CC Lua can resolve self-refs inside
--- `local T = { f = function() return T[...] end }` as a nil global.
-local function isRawMeatName(name)
-    if type(name) ~= "string" or name:find("/cooked_", 1, true) then
-        return false
+local tagFallbacks = {} -- tagId -> predicate(itemName) -> bool
+local spoilCheck = nil -- function(detail) -> bool
+local foodItemCheck = nil -- function(name) -> bool
+
+function transfer.registerTagFallback(tagId, fn)
+    if type(tagId) == "string" and type(fn) == "function" then
+        tagFallbacks[tagId] = fn
     end
-    local leaf = name:match("([^/]+)$") or ""
-    -- TFC/TFG meats + fish (incl. largemouth / smallmouth bass).
-    local raw = {
-        beef = true, pork = true, chicken = true, mutton = true, bear = true,
-        horse_meat = true, venison = true, wolf = true, rabbit = true, hyena = true,
-        duck = true, quail = true, chevon = true, camelidae = true, gran_feline = true,
-        turtle = true, frog_legs = true, cod = true, salmon = true, tropical_fish = true,
-        bluegill = true, largemouth_bass = true, smallmouth_bass = true, rainbow_trout = true,
-        lake_trout = true, lake_whitefish = true, crappie = true, oysters = true,
-        calamari = true,
-    }
-    if raw[leaf] then
-        return true
-    end
-    if leaf:find("bass", 1, true) or leaf:find("trout", 1, true)
-        or leaf:find("fish", 1, true) or leaf:find("meat", 1, true) then
-        return name:sub(1, 9) == "tfc:food/" or name:sub(1, 9) == "tfg:food/"
-            or name:sub(1, 15) == "firmalife:food/"
-    end
-    return false
 end
 
-local function isCookedMeatName(name)
-    -- cooked_X ↔ same raw leaf (avoids cooked_egg / cooked_rice false positives).
-    if type(name) ~= "string" then
-        return false
-    end
-    local rawName = name:gsub("/cooked_", "/", 1)
-    if rawName == name then
-        return false
-    end
-    return isRawMeatName(rawName)
+function transfer.setSpoilCheck(fn)
+    spoilCheck = fn
 end
 
---- Known tag fallbacks when inventory getItemDetail().tags is unavailable.
-local TAG_FALLBACKS = {
-    ["tfc:foods/raw_meats"] = isRawMeatName,
-    ["tfc:foods/cooked_meats"] = isCookedMeatName,
-    ["firmalife:foods/cooked_meats_and_substitutes"] = isCookedMeatName,
-    ["firmalife:foods/pizza_ingredients"] = function(name)
-        if isCookedMeatName(name) then
-            return true
-        end
-        return name == "tfg:food/magmango"
-    end,
-}
+function transfer.setFoodItemCheck(fn)
+    foodItemCheck = fn
+end
 
 function transfer.isTag(query)
     return type(query) == "string" and query:sub(1, 1) == "#"
@@ -82,59 +48,29 @@ function transfer.matches(itemName, tags, query)
                 return true
             end
         end
-        -- Some CC builds return a set { ["tfc:foods/cooked_meats"] = true }
         if tags[tagId] then
             return true
         end
     end
-    local fb = TAG_FALLBACKS[tagId]
+    local fb = tagFallbacks[tagId]
     if fb then
         return fb(itemName) == true
     end
     return false
 end
 
---- TFC/Firmalife food we should inspect for spoil before counting/pushing.
+--- TFC/Firmalife food we should inspect for spoil (when food module registered).
 function transfer.isFoodItem(name)
-    if type(name) ~= "string" then
-        return false
+    if foodItemCheck then
+        return foodItemCheck(name) == true
     end
-    return name:sub(1, 9) == "tfc:food/"
-        or name:sub(1, 9) == "tfg:food/"
-        or name:sub(1, 15) == "firmalife:food/"
-        or name:sub(1, 16) == "firmalife:spice/"
-        or name:find(":food/", 1, true) ~= nil
+    return false
 end
 
---- Best-effort spoil detect from getItemDetail (fields vary by pack/CC bridge).
+--- Best-effort spoil detect (delegates to registered check).
 function transfer.isSpoiled(detail)
-    if type(detail) ~= "table" then
-        return false
-    end
-    if detail.rotten == true or detail.spoiled == true or detail.decayed == true then
-        return true
-    end
-    local decay = tonumber(detail.decay)
-    if decay and decay >= 1 then
-        return true
-    end
-    if type(detail.food) == "table" then
-        local food = detail.food
-        if food.rotten == true or food.spoiled == true then
-            return true
-        end
-        decay = tonumber(food.decay)
-        if decay and decay >= 1 then
-            return true
-        end
-    end
-    local dn = tostring(detail.displayName or detail.display_name or ""):lower()
-    if dn:find("rotten", 1, true)
-        or dn:find("spoiled", 1, true)
-        or dn:find("испорч", 1, true)
-        or dn:find("гниль", 1, true)
-    then
-        return true
+    if spoilCheck then
+        return spoilCheck(detail) == true
     end
     return false
 end
@@ -149,9 +85,14 @@ local function itemTagsFromDetail(detail)
     return nil
 end
 
---- Detail only for #tags (match + spoil). Exact ids stay fast (list() only).
-local function slotDetail(inv, slot, itemQuery)
-    if not transfer.isTag(itemQuery) or not inv.getItemDetail then
+--- Detail for #tags, or exact food ids when food module registered (spoil filter).
+local function slotDetail(inv, slot, itemQuery, itemName)
+    if not inv.getItemDetail then
+        return nil
+    end
+    local need = transfer.isTag(itemQuery)
+        or (itemName and transfer.isFoodItem(itemName))
+    if not need then
         return nil
     end
     local ok, detail = pcall(inv.getItemDetail, slot)
@@ -194,7 +135,7 @@ local function transferItems(from, to, itemQuery, amount)
     local n = 0
     for slot, item in pairs(listed) do
         if moveAll or movedTotal < amount then
-            local detail = slotDetail(source, slot, itemQuery)
+            local detail = slotDetail(source, slot, itemQuery, item.name)
             if slotUsable(item.name, detail, itemQuery) then
                 local limit = moveAll and item.count or (amount - movedTotal)
                 local moved = source.pushItems(to, slot, limit) or 0
@@ -231,7 +172,7 @@ function transfer.countItem(invName, itemQuery)
     end
     local n = 0
     for slot, item in pairs(listed) do
-        local detail = slotDetail(inv, slot, itemQuery)
+        local detail = slotDetail(inv, slot, itemQuery, item.name)
         if slotUsable(item.name, detail, itemQuery) then
             total = total + (item.count or 0)
         end

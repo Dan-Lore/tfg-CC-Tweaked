@@ -8,6 +8,7 @@
 package.path = package.path
     .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"
 
+require("food")
 local transfer = require("transfer")
 local recipes = require("recipes")
 local storage = require("storage")

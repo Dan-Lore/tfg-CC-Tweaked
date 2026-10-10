@@ -1,8 +1,10 @@
 -- Feed / drain / craft.run for processing recipes.
 -- Burst-pushes complete sets; short poll only while waiting on the machine.
 
+require("food") -- register tag/spoil helpers into transfer
 local transfer = require("transfer")
 local craft_stock = require("craft_stock")
+local craft_err = require("craft_err")
 
 local craft_io = {}
 
@@ -68,6 +70,21 @@ function craft_io.rollbackItems(machine, movedItems, store, opts)
     end
 end
 
+--- Rollback fluids from machine into configured fluid_source tanks.
+function craft_io.rollbackFluids(machine, movedFluids, store)
+    if not store or not movedFluids then
+        return
+    end
+    for name, count in pairs(movedFluids) do
+        if count and count > 0 then
+            local info = store.fluidSourceOf(name)
+            if info and info.peripheral and info.fluid and peripheral.isPresent(info.peripheral) then
+                transfer.fluid(machine, info.peripheral, info.fluid, count)
+            end
+        end
+    end
+end
+
 --- Check that one full recipe set is available in storage (no moves).
 function craft_io.setAvailable(recipe, store, opts)
     for i = 1, #recipe.inputs do
@@ -103,7 +120,12 @@ function craft_io.setAvailable(recipe, store, opts)
     return true, nil
 end
 
---- Push exactly one recipe unit into the machine. Rolls back items on mid-set failure.
+local function rollbackAll(machine, movedItems, movedFluids, store, opts)
+    craft_io.rollbackItems(machine, movedItems, store, opts)
+    craft_io.rollbackFluids(machine, movedFluids, store)
+end
+
+--- Push exactly one recipe unit into the machine. Rolls back items+fluids on mid-set failure.
 function craft_io.pushOneSet(recipe, machine, store, opts)
     local okAvail, missing = craft_io.setAvailable(recipe, store, opts)
     if not okAvail then
@@ -120,7 +142,7 @@ function craft_io.pushOneSet(recipe, machine, store, opts)
             local n = transfer.fromMany(sources, machine, input.name, input.count)
             movedItems[input.name] = (movedItems[input.name] or 0) + n
             if n < input.count then
-                craft_io.rollbackItems(machine, movedItems, store, opts)
+                rollbackAll(machine, movedItems, movedFluids, store, opts)
                 return false, movedItems, {
                     name = input.name,
                     count = input.count - n,
@@ -136,7 +158,7 @@ function craft_io.pushOneSet(recipe, machine, store, opts)
         if input.fluid then
             local _, info = craft_stock.countFluidAvailable(store, input.name)
             if not info then
-                craft_io.rollbackItems(machine, movedItems, store, opts)
+                rollbackAll(machine, movedItems, movedFluids, store, opts)
                 return false, movedItems, {
                     name = input.name,
                     count = input.count,
@@ -147,8 +169,15 @@ function craft_io.pushOneSet(recipe, machine, store, opts)
             local n = transfer.fluid(info.peripheral, machine, info.fluid, input.count)
             movedFluids[input.name] = (movedFluids[input.name] or 0) + n
             if n < input.count then
-                craft_io.rollbackItems(machine, movedItems, store, opts)
-                return false, movedItems, {
+                rollbackAll(machine, movedItems, movedFluids, store, opts)
+                local moved = {}
+                for k, v in pairs(movedItems) do
+                    moved[k] = v
+                end
+                for k, v in pairs(movedFluids) do
+                    moved[k] = (moved[k] or 0) + v
+                end
+                return false, moved, {
                     name = input.name,
                     count = input.count - n,
                     fluid = true,
@@ -178,12 +207,33 @@ function craft_io.craftWaitTimeout(opts, times)
     return base * times
 end
 
-function craft_io.drainToward(pullFrom, need, pulled, store, fallbackOut, recipe)
+--- Pull fluid from machine into the fluid_source tank for this recipe fluid/tag.
+function craft_io.pullFluidAmount(from, fluidOrTag, amount, store)
+    amount = tonumber(amount) or 0
+    if amount <= 0 or not from or not store then
+        return 0
+    end
+    local info = store.fluidSourceOf(fluidOrTag)
+    if not info or not info.peripheral or not info.fluid then
+        return 0
+    end
+    if not peripheral.isPresent(from) or not peripheral.isPresent(info.peripheral) then
+        return 0
+    end
+    return transfer.fluid(from, info.peripheral, info.fluid, amount)
+end
+
+function craft_io.drainToward(pullFrom, need, pulled, store, fallbackOut, recipe, fluidKeys)
     local complete = true
     for name, want in pairs(need) do
         local remaining = want - (pulled[name] or 0)
         if remaining > 0 then
-            local n = craft_io.pullItemAmount(pullFrom, name, remaining, store, fallbackOut, recipe)
+            local n
+            if fluidKeys and fluidKeys[name] then
+                n = craft_io.pullFluidAmount(pullFrom, name, remaining, store)
+            else
+                n = craft_io.pullItemAmount(pullFrom, name, remaining, store, fallbackOut, recipe)
+            end
             pulled[name] = (pulled[name] or 0) + n
             if pulled[name] < want then
                 complete = false
@@ -193,17 +243,24 @@ function craft_io.drainToward(pullFrom, need, pulled, store, fallbackOut, recipe
     return complete
 end
 
+--- Build item+fluid output need maps.
+-- @return need, anyItem, fluidKeys, anyFluid
 function craft_io.buildNeedMap(outputs, times)
     local need = {}
+    local fluidKeys = {}
     local anyItem = false
+    local anyFluid = false
     for i = 1, #outputs do
         local o = outputs[i]
-        if not o.fluid then
+        need[o.name] = (need[o.name] or 0) + o.count * times
+        if o.fluid then
+            anyFluid = true
+            fluidKeys[o.name] = true
+        else
             anyItem = true
-            need[o.name] = (need[o.name] or 0) + o.count * times
         end
     end
-    return need, anyItem
+    return need, anyItem, fluidKeys, anyFluid
 end
 
 --- Set-by-set feed + continuous drain. Does not take the machine lock.
@@ -216,7 +273,9 @@ function craft_io.run(recipe, opts)
     assert(from and out, "opts.from/opts.out or opts.store required")
 
     if recipe.flag == "grow" then
-        return false, "use craft.request for grow recipes"
+        return craft_err.fail("use_request", {
+            message = "use craft.request for grow recipes",
+        })
     end
 
     local times = math.max(1, math.floor(tonumber(opts.times) or 1))
@@ -231,7 +290,8 @@ function craft_io.run(recipe, opts)
 
     local oneshot = recipe.oneshot == true
     local targetSets = times
-    local need, anyItem = craft_io.buildNeedMap(recipe.outputs, targetSets)
+    local need, anyItem, fluidKeys, anyFluid = craft_io.buildNeedMap(recipe.outputs, targetSets)
+    local anyOutput = anyItem or anyFluid
     local pulled = {}
     for name in pairs(need) do
         pulled[name] = 0
@@ -250,7 +310,8 @@ function craft_io.run(recipe, opts)
     local STALL_FAIL = 10 -- seconds
 
     local function rebuildNeed(sets)
-        need, anyItem = craft_io.buildNeedMap(recipe.outputs, sets)
+        need, anyItem, fluidKeys, anyFluid = craft_io.buildNeedMap(recipe.outputs, sets)
+        anyOutput = anyItem or anyFluid
         for name in pairs(need) do
             if not pulled[name] then
                 pulled[name] = 0
@@ -259,7 +320,7 @@ function craft_io.run(recipe, opts)
     end
 
     local function outputsComplete()
-        if not anyItem then
+        if not anyOutput then
             return setsPushed >= targetSets
         end
         for name, want in pairs(need) do
@@ -274,7 +335,7 @@ function craft_io.run(recipe, opts)
         if not oneshot or setsPushed == 0 then
             return true
         end
-        if not anyItem then
+        if not anyOutput then
             return true
         end
         local needSoFar = craft_io.buildNeedMap(recipe.outputs, setsPushed)
@@ -332,7 +393,7 @@ function craft_io.run(recipe, opts)
     end
 
     while os.clock() < deadline do
-        craft_io.drainToward(pullFrom, need, pulled, store, out, recipe)
+        craft_io.drainToward(pullFrom, need, pulled, store, out, recipe, fluidKeys)
         emitSetsProgress()
         if outputsComplete() then
             return finishOk()
@@ -348,7 +409,7 @@ function craft_io.run(recipe, opts)
                     movedTotals[k] = (movedTotals[k] or 0) + v
                 end
                 emitSetsProgress()
-                craft_io.drainToward(pullFrom, need, pulled, store, out, recipe)
+                craft_io.drainToward(pullFrom, need, pulled, store, out, recipe, fluidKeys)
                 if outputsComplete() then
                     return finishOk()
                 end
@@ -392,7 +453,7 @@ function craft_io.run(recipe, opts)
         sleep(POLL)
     end
 
-    craft_io.drainToward(pullFrom, need, pulled, store, out, recipe)
+    craft_io.drainToward(pullFrom, need, pulled, store, out, recipe, fluidKeys)
     emitSetsProgress()
     if outputsComplete() then
         return finishOk()

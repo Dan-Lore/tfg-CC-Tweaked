@@ -13,6 +13,11 @@ local util = require("util")
 
 local recipes = {}
 
+--- Override in tests; default prints a warning line.
+function recipes.warn(msg)
+    print(tostring(msg))
+end
+
 --- Parse "mod:id 4" or "mod:fluid 100mb" or "#tag:path 1"
 local function parseStack(token)
     token = util.trim(token)
@@ -133,7 +138,53 @@ function recipes.parseLine(line, lineNo)
     }
 end
 
+--- Map non-fluid output name -> list of recipes that produce it (cfg order).
+function recipes.findDuplicateOutputs(list)
+    local byOut = {}
+    if not list then
+        return byOut
+    end
+    for i = 1, #list do
+        local recipe = list[i]
+        local outs = recipe.outputs or {}
+        for j = 1, #outs do
+            local out = outs[j]
+            if out and not out.fluid and out.name then
+                local bucket = byOut[out.name]
+                if not bucket then
+                    bucket = {}
+                    byOut[out.name] = bucket
+                end
+                bucket[#bucket + 1] = recipe
+            end
+        end
+    end
+    local dups = {}
+    for name, bucket in pairs(byOut) do
+        if #bucket > 1 then
+            dups[name] = bucket
+        end
+    end
+    return dups
+end
+
+local function warnDuplicateOutputs(list)
+    local dups = recipes.findDuplicateOutputs(list)
+    for name, bucket in pairs(dups) do
+        local lines = {}
+        for i = 1, #bucket do
+            lines[#lines + 1] = tostring(bucket[i].line or "?")
+        end
+        recipes.warn(string.format(
+            "recipes: duplicate output %s — using first (lines %s)",
+            tostring(name),
+            table.concat(lines, ", ")
+        ))
+    end
+end
+
 --- Load recipes. Prefers <program>.cfg [recipes], else recipes.cfg.
+-- Duplicate non-fluid outputs: keep cfg order (first wins in craft_plan); warn once.
 function recipes.load(path)
     local lines = util.openConfigLines(path, "recipes", "recipes.cfg")
     local list = {}
@@ -143,6 +194,7 @@ function recipes.load(path)
             list[#list + 1] = recipe
         end
     end
+    warnDuplicateOutputs(list)
     return list
 end
 

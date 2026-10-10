@@ -1,5 +1,5 @@
 -- Distillation tower monitor UI (CC: Tweaked / TFG).
--- One gas per full-width row (no 2-col clip). Copy next to main.lua.
+-- One gas per full-width row (no 2-col clip). Required by main.lua.
 
 local ui = {}
 
