@@ -6,6 +6,7 @@ Usage:
   python tools/bundle_project.py crystals
   python tools/bundle_project.py power
   python tools/bundle_project.py distill
+  python tools/bundle_project.py ebf
   python tools/bundle_project.py ae_stats sampler
   python tools/bundle_project.py ae_stats display
   python tools/bundle_project.py ae_stats graphview
@@ -64,6 +65,9 @@ POWER_CFG_HINT = (
 DISTILL_CFG_HINT = (
     "-- Also copy distill.cfg next to this file on the computer."
 )
+EBF_CFG_HINT = (
+    "-- Also copy ebf.cfg next to this file on the computer."
+)
 AE_STATS_CFG_HINT = (
     "-- Also copy the matching .cfg next to this file "
     "(sampler.cfg / display.cfg / graphview.cfg; "
@@ -76,6 +80,7 @@ COPY_CFG: dict[str, str] = {
     "ae2_feed": "ae2_feed.cfg",
     "power": "power.cfg",
     "distill": "distill.cfg",
+    "ebf": "ebf.cfg",
 }
 
 # project -> entry -> cfg filename (copied to dist/<cfg>).
@@ -184,6 +189,8 @@ def build_bundle(
         parts.append(POWER_CFG_HINT + "\n")
     elif project == "distill":
         parts.append(DISTILL_CFG_HINT + "\n")
+    elif project == "ebf":
+        parts.append(EBF_CFG_HINT + "\n")
     elif project == "ae_stats":
         parts.append(AE_STATS_CFG_HINT + "\n")
     parts.append("-- Generated package.preload modules + entrypoint.\n\n")
@@ -273,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         out_name = "power"
     elif project == "distill" and entry == "main":
         out_name = "distill"
+    elif project == "ebf" and entry == "main":
+        out_name = "ebf"
     else:
         out_name = entry
     out_dir = REPO_ROOT / "dist"

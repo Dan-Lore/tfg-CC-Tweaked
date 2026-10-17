@@ -1,0 +1,35 @@
+---
+description: Electric blast furnace recipe feeder (ebf/)
+globs:
+  - ebf/**
+---
+
+# ebf
+
+CC: Tweaked script for TerraFirmaGreg. Feeds atomic recipes from HV buffers into EBF hatch packs and drains outputs. Does **not** enable/disable the furnaces.
+
+## Layout
+
+- Monitor: top (2 high × 1 wide)
+- Recipe sources: `gtceu:hv_buffer_N` for N ≥ 1
+- Hot sink: `gtceu:hv_buffer_0` (hot_*_ingot only)
+- AE sink: `ae2:pattern_provider_5`
+- **One hatch index N** (`lv_input_bus_N` + `ev_input_hatch_4x_N` + `lv_output_bus_N` + `lv_output_hatch_N`)
+  = furnaces **(N+1)L + (N+1)R** sharing those hatches
+- Example: hatch `0` → `1L/1R`, hatch `1` → `2L/2R`, …
+
+## Behaviour
+
+- Snapshot / push recipe units; single-item stacks split by `items_per_recipe`
+- Sticky `inflight` + round-robin across hatch packs (not L vs R — they share buses)
+- `max_inflight` default **6** per pack (2 crafting + 4 buffered for the L+R pair)
+- Drain: hot → hot_sink; rest → ae_sink
+- Sequential modem I/O; idle ≥0.05s
+
+## Deploy
+
+```text
+python tools/bundle_project.py ebf
+```
+
+Copy **both** `dist/ebf.lua` and `dist/ebf.cfg` onto the computer.

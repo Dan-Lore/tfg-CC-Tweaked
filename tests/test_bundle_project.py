@@ -71,6 +71,17 @@ def test_bundle_crystals_copies_cfg(bundler):
     assert (REPO / "dist" / "crystals.cfg").is_file()
 
 
+def test_bundle_ebf_copies_cfg(bundler):
+    rc = bundler.main(["ebf"])
+    assert rc == 0
+    assert (REPO / "dist" / "ebf.lua").is_file()
+    assert (REPO / "dist" / "ebf.cfg").is_file()
+    text = (REPO / "dist" / "ebf.lua").read_text(encoding="utf-8")
+    assert 'package.preload["furnace"]' in text
+    assert "Bundled from ebf/main.lua" in text
+
+
+
 def test_circular_require_detected(bundler, tmp_path):
     proj = tmp_path / "circ"
     proj.mkdir()

@@ -1,0 +1,396 @@
+#!/usr/bin/env lua
+local boot = loadfile("tests/loader.lua")()
+local T = boot()
+local A = T.assert
+local stub = T.stub
+
+-- Prefer ebf/ over other projects that also ship config/discover modules.
+do
+    local root = T.root
+    package.path = table.concat({
+        root .. "/ebf/?.lua",
+        root .. "/shared/?.lua",
+        root .. "/tests/?.lua",
+        package.path,
+    }, ";")
+    for _, name in ipairs({
+        "config", "discover", "recipe", "furnace", "ui", "main",
+    }) do
+        package.loaded[name] = nil
+    end
+end
+
+local discover = require("discover")
+local recipe = require("recipe")
+local furnace = require("furnace")
+local configMod = require("config")
+
+local function addInv(name, slots)
+    stub.addPeripheral(name, stub.makeInventory(slots or {}))
+end
+
+local function addTankInv(name, slots, fluids)
+    local inv = stub.makeInventory(slots or {})
+    local tank = stub.makeTank(fluids or {})
+    inv.tanks = tank.tanks
+    inv.pushFluid = tank.pushFluid
+    inv._receiveFluid = tank._receiveFluid
+    inv._fluids = tank._fluids
+    stub.addPeripheral(name, inv)
+end
+
+A.suite("ebf discover / recipe / furnace", {
+    {
+        name = "config defaults when cfg missing",
+        fn = function()
+            stub.reset()
+            stub.install()
+            stub.setRunningProgram("/ebf/ebf.lua")
+            local cfg = configMod.load("/missing_ebf.cfg")
+            A.eq(cfg.hot_sink, "gtceu:hv_buffer_0")
+            A.eq(cfg.max_inflight, 6)
+            A.eq(cfg.recipe_buffer_min, 1)
+        end,
+    },
+    {
+        name = "prefixedIndex parses hatch names",
+        fn = function()
+            A.eq(discover._prefixedIndex("gtceu:lv_input_bus_3", "gtceu:lv_input_bus"), 3)
+            A.eq(discover._prefixedIndex("gtceu:hv_buffer_0", "gtceu:hv_buffer"), 0)
+            A.isNil(discover._prefixedIndex("gtceu:lv_input_bus_3", "gtceu:lv_output_bus"))
+        end,
+    },
+    {
+        name = "scan groups furnaces by index and skips buffer_0",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_0", {})
+            addInv("gtceu:hv_buffer_1", { [1] = { name = "gtceu:iron_dust", count = 3 } })
+            addInv("gtceu:hv_buffer_2", {})
+            addInv("ae2:pattern_provider_5", {})
+            addInv("gtceu:lv_input_bus_0", {})
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
+            addInv("gtceu:lv_output_bus_0", {})
+            addTankInv("gtceu:lv_output_hatch_0", {}, {})
+            addInv("gtceu:lv_input_bus_1", {})
+            addInv("gtceu:lv_output_bus_1", {})
+            -- incomplete index 2: only input bus
+            addInv("gtceu:lv_input_bus_2", {})
+
+            local net = discover.scan({
+                recipe_buffer_prefix = "gtceu:hv_buffer",
+                recipe_buffer_min = 1,
+                hot_sink = "gtceu:hv_buffer_0",
+                ae_sink = "ae2:pattern_provider_5",
+                input_bus_prefix = "gtceu:lv_input_bus",
+                input_hatch_prefix = "gtceu:ev_input_hatch_4x",
+                output_bus_prefix = "gtceu:lv_output_bus",
+                output_hatch_prefix = "gtceu:lv_output_hatch",
+            })
+
+            A.eq(#net.buffers, 2)
+            A.eq(net.buffers[1], "gtceu:hv_buffer_1")
+            A.eq(net.buffers[2], "gtceu:hv_buffer_2")
+            A.eq(net.hotSink, "gtceu:hv_buffer_0")
+            -- Each hatch index = one NL+NR pack (not merged).
+            A.eq(#net.furnaces, 2)
+            A.eq(net.furnaces[1].index, 0)
+            A.eq(net.furnaces[1].label, "1L/1R")
+            A.eq(net.furnaces[1].inputBus, "gtceu:lv_input_bus_0")
+            A.eq(net.furnaces[2].index, 1)
+            A.eq(net.furnaces[2].label, "2L/2R")
+        end,
+    },
+    {
+        name = "recipe snapshot and atomic push",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addTankInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:iron_dust", count = 2 },
+                [2] = { name = "minecraft:coal", count = 1 },
+            }, {
+                { name = "gtceu:oxygen", amount = 500 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
+
+            local snap = recipe.snapshot("gtceu:hv_buffer_1")
+            A.truthy(recipe.hasContent(snap))
+            A.eq(snap.items["gtceu:iron_dust"], 2)
+            A.eq(snap.fluids["gtceu:oxygen"], 500)
+
+            local ok, mi, mf, err = recipe.pushAtomic(
+                "gtceu:hv_buffer_1",
+                "gtceu:lv_input_bus_0",
+                "gtceu:ev_input_hatch_4x_0"
+            )
+            A.truthy(ok, err)
+            A.eq(mi, 3)
+            A.eq(mf, 500)
+            A.truthy(recipe.isEmpty(recipe.snapshot("gtceu:hv_buffer_1")))
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:iron_dust"], 2)
+        end,
+    },
+    {
+        name = "pickTarget prefers least loaded",
+        fn = function()
+            local states = {
+                [0] = { index = 0, inflight = 2, id = "ebf_0" },
+                [1] = { index = 1, inflight = 0, id = "ebf_1" },
+                [2] = { index = 2, inflight = 1, id = "ebf_2" },
+            }
+            local t = furnace.pickTarget(states, 3)
+            A.eq(t.index, 1)
+            states[1].inflight = 3
+            t = furnace.pickTarget(states, 3)
+            A.eq(t.index, 2)
+            states[2].inflight = 3
+            states[0].inflight = 3
+            A.isNil(furnace.pickTarget(states, 3))
+        end,
+    },
+    {
+        name = "feedOne bumps inflight; drain hot to sink",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:iron_dust", count = 1 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {
+                [1] = { name = "gtceu:hot_iron_ingot", count = 1 },
+                [2] = { name = "gtceu:ash_dust", count = 2 },
+            })
+            addInv("gtceu:hv_buffer_0", {})
+            addInv("ae2:pattern_provider_5", {})
+
+            local states = {
+                [0] = furnace.newState({
+                    index = 0,
+                    id = "ebf_0",
+                    inputBus = "gtceu:lv_input_bus_0",
+                    outputBus = "gtceu:lv_output_bus_0",
+                }),
+            }
+            states[0].inflight = 1
+
+            local st, err = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
+            A.truthy(st, err)
+            A.eq(states[0].inflight, 2)
+
+            local hot, other, _, done = furnace.drain(
+                states[0],
+                "gtceu:hv_buffer_0",
+                "ae2:pattern_provider_5",
+                1
+            )
+            A.eq(hot, 1)
+            A.eq(other, 2)
+            A.eq(done, 1)
+            A.eq(states[0].inflight, 1)
+            A.eq(recipe.snapshot("gtceu:hv_buffer_0").items["gtceu:hot_iron_ingot"], 1)
+            A.eq(recipe.snapshot("ae2:pattern_provider_5").items["gtceu:ash_dust"], 2)
+        end,
+    },
+    {
+        name = "estimateDone counts stacked hot ingots",
+        fn = function()
+            A.eq(furnace.estimateDone(5, 0, 0, 3, 1), 3)
+            A.eq(furnace.estimateDone(5, 0, 0, 8, 1), 5)
+            A.eq(furnace.estimateDone(0, 4, 0, 2, 1), 1)
+            A.eq(furnace.estimateDone(0, 0, 1000, 2, 1), 1)
+            A.eq(furnace.estimateDone(0, 0, 0, 2, 1), 0)
+        end,
+    },
+    {
+        name = "drain stacked hot ingots clears multiple inflight",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_output_bus_0", {
+                [1] = { name = "gtceu:hot_aluminium_ingot", count = 4 },
+            })
+            addInv("gtceu:hv_buffer_0", {})
+            addInv("ae2:pattern_provider_5", {})
+
+            local st = furnace.newState({
+                index = 0,
+                id = "ebf_0",
+                inputBus = "gtceu:lv_input_bus_0",
+                outputBus = "gtceu:lv_output_bus_0",
+            })
+            st.inflight = 3
+
+            local hot, _, _, done = furnace.drain(st, "gtceu:hv_buffer_0", "ae2:pattern_provider_5", 1)
+            A.eq(hot, 4)
+            A.eq(done, 3)
+            A.eq(st.inflight, 0)
+            A.eq(st.drained, 3)
+        end,
+    },
+    {
+        name = "isHotIngot matches gtceu hot ingots",
+        fn = function()
+            A.truthy(furnace.isHotIngot("gtceu:hot_steel_ingot"))
+            A.truthy(furnace.isHotIngot("gtceu:hot_tungstensteel_ingot"))
+            A.falsy(furnace.isHotIngot("gtceu:steel_ingot"))
+            A.falsy(furnace.isHotIngot("gtceu:ash_dust"))
+        end,
+    },
+    {
+        name = "pushOneRecipe splits single-item stack by unit",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:aluminium_dust", count = 4 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+
+            local ok, mi = recipe.pushOneRecipe(
+                "gtceu:hv_buffer_1",
+                "gtceu:lv_input_bus_0",
+                nil,
+                1,
+                0
+            )
+            A.truthy(ok)
+            A.eq(mi, 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
+            A.eq(recipe.snapshot("gtceu:hv_buffer_1").items["gtceu:aluminium_dust"], 3)
+        end,
+    },
+    {
+        name = "pickTarget round-robins equal loads",
+        fn = function()
+            local states = {
+                [0] = { index = 0, inflight = 0 },
+                [1] = { index = 1, inflight = 0 },
+                [2] = { index = 2, inflight = 0 },
+            }
+            local list = furnace.listByIndex(states)
+            local a, rr = furnace.pickTarget(states, 6, list, 1)
+            A.eq(a.index, 0)
+            local b, rr2 = furnace.pickTarget(states, 6, list, rr)
+            A.eq(b.index, 1)
+            local c = furnace.pickTarget(states, 6, list, rr2)
+            A.eq(c.index, 2)
+        end,
+    },
+    {
+        name = "feed spreads units across hatch packs",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:aluminium_dust", count = 2 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {})
+            addInv("gtceu:lv_input_bus_1", {})
+            addInv("gtceu:lv_output_bus_1", {})
+
+            local states = {
+                [0] = furnace.newState({
+                    index = 0,
+                    id = "ebf_0",
+                    inputBus = "gtceu:lv_input_bus_0",
+                    outputBus = "gtceu:lv_output_bus_0",
+                }),
+                [1] = furnace.newState({
+                    index = 1,
+                    id = "ebf_1",
+                    inputBus = "gtceu:lv_input_bus_1",
+                    outputBus = "gtceu:lv_output_bus_1",
+                }),
+            }
+
+            local a = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
+            A.truthy(a)
+            A.eq(a.index, 0)
+            A.eq(states[0].inflight, 1)
+
+            local b = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
+            A.truthy(b)
+            A.eq(b.index, 1)
+            A.eq(states[1].inflight, 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
+        end,
+    },
+    {
+        name = "AE refill after snap push still counts success",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:aluminium_dust", count = 1 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {})
+
+            local snap = recipe.snapshot("gtceu:hv_buffer_1")
+            -- Simulate AE dropping the next recipe into the buffer mid-push:
+            -- after we move the snapshotted stack, refill appears.
+            local buf = peripheral.wrap("gtceu:hv_buffer_1")
+            local origPush = buf.pushItems
+            buf.pushItems = function(toName, fromSlot, limit, toSlot)
+                local moved = origPush(toName, fromSlot, limit, toSlot)
+                -- Refill while transfer runs.
+                buf._receive("gtceu:aluminium_dust", 1)
+                return moved
+            end
+
+            local ok, mi, _, err = recipe.pushAtomic(
+                "gtceu:hv_buffer_1",
+                "gtceu:lv_input_bus_0",
+                nil,
+                snap
+            )
+            A.truthy(ok, err)
+            A.eq(mi, 1)
+            -- Leftover refill stays for the next furnace cycle.
+            A.eq(recipe.snapshot("gtceu:hv_buffer_1").items["gtceu:aluminium_dust"], 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
+        end,
+    },
+    {
+        name = "second feed goes to least-loaded pack",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:aluminium_dust", count = 1 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {})
+            addInv("gtceu:lv_input_bus_1", {})
+            addInv("gtceu:lv_output_bus_1", {})
+
+            local states = {
+                [0] = furnace.newState({
+                    index = 0,
+                    id = "ebf_0",
+                    inputBus = "gtceu:lv_input_bus_0",
+                    outputBus = "gtceu:lv_output_bus_0",
+                }),
+                [1] = furnace.newState({
+                    index = 1,
+                    id = "ebf_1",
+                    inputBus = "gtceu:lv_input_bus_1",
+                    outputBus = "gtceu:lv_output_bus_1",
+                }),
+            }
+            states[0].inflight = 1
+
+            local st = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
+            A.truthy(st)
+            A.eq(st.index, 1)
+            A.eq(states[1].inflight, 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
+        end,
+    },
+})

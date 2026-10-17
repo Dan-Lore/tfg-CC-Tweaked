@@ -14,6 +14,7 @@ ENTRIES: list[tuple[str, str]] = [
     ("crystals", "main"),
     ("power", "main"),
     ("distill", "main"),
+    ("ebf", "main"),
     ("ae_stats", "sampler"),
     ("ae_stats", "display"),
     ("ae_stats", "graphview"),

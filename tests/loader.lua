@@ -29,6 +29,7 @@ return function(opts)
         root .. "/ae2_feed/?.lua",
         root .. "/crystals/?.lua",
         root .. "/distill/?.lua",
+        root .. "/ebf/?.lua",
         package.path,
     }, ";")
 
@@ -39,6 +40,7 @@ return function(opts)
         "machine_lock", "craft_err", "greenhouse", "peripherals",
         "history", "config_common", "protocol", "config",
         "craft", "craft_monitor", "craft_grow", "craft_log",
+        "discover", "recipe", "furnace", "ui", "move", "feed", "sort",
     }
     for i = 1, #purge do
         package.loaded[purge[i]] = nil
