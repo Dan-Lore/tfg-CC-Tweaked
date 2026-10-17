@@ -76,12 +76,14 @@ local function refreshUi(force)
         return
     end
     lastUiAt = now
+    local itemsPer = tonumber(config.items_per_recipe) or 1
     local view = {}
     for i = 1, #packList do
         local st = packList[i]
+        -- Show items actually in the input bus, not sticky ghosts.
         view[i] = {
             index = st.pair or ((st.index or 0) + 1),
-            inflight = st.inflight or 0,
+            inflight = furnace.bufferedUnits(st, itemsPer),
             lastRecipe = st.lastRecipe,
         }
     end
@@ -137,10 +139,14 @@ end
 
 local function drainAll()
     local hotPer = tonumber(config.hot_per_recipe) or 1
+    local itemsPer = tonumber(config.items_per_recipe) or 1
+    local grace = tonumber(config.craft_grace) or 45
     local done = 0
     for i = 1, #packList do
-        local _, _, _, d = furnace.drain(packList[i], net.hotSink, net.aeSink, hotPer)
+        local st = packList[i]
+        local _, _, _, d = furnace.drain(st, net.hotSink, net.aeSink, hotPer)
         done = done + d
+        done = done + furnace.reconcile(st, itemsPer, grace)
     end
     return done
 end
@@ -185,6 +191,7 @@ local function feedPass()
             if ok then
                 st.inflight = (st.inflight or 0) + 1
                 st.fed = (st.fed or 0) + 1
+                st.lastFeedAt = furnace._nowSeconds()
                 st.lastRecipe = recipe.label(movedSnap)
                 st.lastError = nil
                 fed = fed + 1
@@ -216,22 +223,13 @@ local function tick()
         return false
     end
 
-    local worked = false
-    for _ = 1, 64 do
-        local done = drainAll()
-        if done > 0 then
-            quietDone = quietDone + done
-            worked = true
-        end
-        local fed = feedPass()
-        if fed > 0 then
-            worked = true
-        end
-        if fed == 0 and done == 0 then
-            break
-        end
-        sleep(0)
+    -- One drain+feed per wake: a 64× loop re-flooded packs after sticky clear.
+    local done = drainAll()
+    if done > 0 then
+        quietDone = quietDone + done
     end
+    local fed = feedPass()
+    local worked = fed > 0 or done > 0
 
     if quietFed > 0 or quietDone > 0 then
         if (os.clock() - lastStatusAt) >= 2 then
@@ -256,7 +254,7 @@ print(("ebf: cfg %s%s"):format(
     tostring(cfgPath),
     cfgLoaded and " (loaded)" or " (defaults)"
 ))
-print(("ebf: max_inflight=%s items_per_recipe=%s (pack = NL+NR)"):format(
+print(("ebf: max_inflight=%s items_per_recipe=%s (fill pack before next)"):format(
     tostring(config.max_inflight),
     tostring(config.items_per_recipe or 1)
 ))

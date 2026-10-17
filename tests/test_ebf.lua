@@ -96,10 +96,10 @@ A.suite("ebf discover / recipe / furnace", {
             -- Each hatch index = one NL+NR pack (not merged).
             A.eq(#net.furnaces, 2)
             A.eq(net.furnaces[1].index, 0)
-            A.eq(net.furnaces[1].label, "1L/1R")
+            A.eq(net.furnaces[1].label, "1")
             A.eq(net.furnaces[1].inputBus, "gtceu:lv_input_bus_0")
             A.eq(net.furnaces[2].index, 1)
-            A.eq(net.furnaces[2].label, "2L/2R")
+            A.eq(net.furnaces[2].label, "2")
         end,
     },
     {
@@ -134,20 +134,23 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "pickTarget prefers least loaded",
+        name = "pickTarget concentrates on open pack",
         fn = function()
             local states = {
                 [0] = { index = 0, inflight = 2, id = "ebf_0" },
                 [1] = { index = 1, inflight = 0, id = "ebf_1" },
                 [2] = { index = 2, inflight = 1, id = "ebf_2" },
             }
+            -- Prefer already-open pack 0 over empty pack 1 (L+R share bus).
             local t = furnace.pickTarget(states, 3)
-            A.eq(t.index, 1)
-            states[1].inflight = 3
+            A.eq(t.index, 0)
+            states[0].inflight = 3
             t = furnace.pickTarget(states, 3)
             A.eq(t.index, 2)
             states[2].inflight = 3
-            states[0].inflight = 3
+            t = furnace.pickTarget(states, 3)
+            A.eq(t.index, 1)
+            states[1].inflight = 3
             A.isNil(furnace.pickTarget(states, 3))
         end,
     },
@@ -236,8 +239,90 @@ A.suite("ebf discover / recipe / furnace", {
         fn = function()
             A.truthy(furnace.isHotIngot("gtceu:hot_steel_ingot"))
             A.truthy(furnace.isHotIngot("gtceu:hot_tungstensteel_ingot"))
+            A.truthy(furnace.isHotIngot("gtceu:hot_aluminium_ingot"))
             A.falsy(furnace.isHotIngot("gtceu:steel_ingot"))
             A.falsy(furnace.isHotIngot("gtceu:ash_dust"))
+        end,
+    },
+    {
+        name = "reconcile clears sticky when bus empty past grace",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {})
+            local st = furnace.newState({
+                index = 0,
+                id = "ebf_0",
+                inputBus = "gtceu:lv_input_bus_0",
+                outputBus = "gtceu:lv_output_bus_0",
+            })
+            st.inflight = 5
+            st.lastFeedAt = 1000
+            local drop = furnace.reconcile(st, 1, 8, 1020)
+            A.eq(drop, 5)
+            A.eq(st.inflight, 0)
+            A.eq(st.drained, 5)
+        end,
+    },
+    {
+        name = "reconcile keeps paired sticky during craft grace",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {})
+            local st = furnace.newState({
+                index = 0,
+                id = "ebf_0",
+                inputBus = "gtceu:lv_input_bus_0",
+                outputBus = "gtceu:lv_output_bus_0",
+            })
+            st.inflight = 5
+            st.lastFeedAt = 1000
+            local drop = furnace.reconcile(st, 1, 8, 1003)
+            A.eq(drop, 3)
+            A.eq(st.inflight, 2)
+        end,
+    },
+    {
+        name = "reconcile clears unknown sticky with empty bus",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {})
+            local st = furnace.newState({
+                index = 0,
+                id = "ebf_0",
+                inputBus = "gtceu:lv_input_bus_0",
+                outputBus = "gtceu:lv_output_bus_0",
+            })
+            st.inflight = 5
+            local drop = furnace.reconcile(st, 1, 8, 50)
+            A.eq(drop, 5)
+            A.eq(st.inflight, 0)
+        end,
+    },
+    {
+        name = "reconcile caps sticky to buffered only",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {
+                [1] = { name = "gtceu:aluminium_dust", count = 3 },
+            })
+            addInv("gtceu:lv_output_bus_0", {})
+            local st = furnace.newState({
+                index = 0,
+                id = "ebf_0",
+                inputBus = "gtceu:lv_input_bus_0",
+                outputBus = "gtceu:lv_output_bus_0",
+            })
+            st.inflight = 6
+            local drop = furnace.reconcile(st, 1, 8)
+            A.eq(drop, 3)
+            A.eq(st.inflight, 3)
         end,
     },
     {
@@ -264,7 +349,7 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "pickTarget round-robins equal loads",
+        name = "pickTarget fills one pack before opening next",
         fn = function()
             local states = {
                 [0] = { index = 0, inflight = 0 },
@@ -272,16 +357,18 @@ A.suite("ebf discover / recipe / furnace", {
                 [2] = { index = 2, inflight = 0 },
             }
             local list = furnace.listByIndex(states)
-            local a, rr = furnace.pickTarget(states, 6, list, 1)
+            local a = furnace.pickTarget(states, 6, list, 1)
             A.eq(a.index, 0)
-            local b, rr2 = furnace.pickTarget(states, 6, list, rr)
-            A.eq(b.index, 1)
-            local c = furnace.pickTarget(states, 6, list, rr2)
-            A.eq(c.index, 2)
+            states[0].inflight = 1
+            local b = furnace.pickTarget(states, 6, list, 1)
+            A.eq(b.index, 0)
+            states[0].inflight = 6
+            local c = furnace.pickTarget(states, 6, list, 1)
+            A.eq(c.index, 1)
         end,
     },
     {
-        name = "feed spreads units across hatch packs",
+        name = "feed fills same hatch pack before next",
         fn = function()
             stub.reset()
             stub.install()
@@ -315,10 +402,11 @@ A.suite("ebf discover / recipe / furnace", {
 
             local b = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
             A.truthy(b)
-            A.eq(b.index, 1)
-            A.eq(states[1].inflight, 1)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
+            A.eq(b.index, 0)
+            A.eq(states[0].inflight, 2)
+            A.eq(states[1].inflight, 0)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 2)
+            A.isNil(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"])
         end,
     },
     {
@@ -358,7 +446,7 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "second feed goes to least-loaded pack",
+        name = "second feed stays on open pack",
         fn = function()
             stub.reset()
             stub.install()
@@ -388,9 +476,10 @@ A.suite("ebf discover / recipe / furnace", {
 
             local st = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
             A.truthy(st)
-            A.eq(st.index, 1)
-            A.eq(states[1].inflight, 1)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
+            A.eq(st.index, 0)
+            A.eq(states[0].inflight, 2)
+            A.eq(states[1].inflight, 0)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
         end,
     },
 })

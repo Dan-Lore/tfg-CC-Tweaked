@@ -158,7 +158,7 @@ function discover.furnaces(cfg)
                 index = idx,
                 pair = idx + 1,
                 id = "ebf_" .. tostring(idx),
-                label = tostring(idx + 1) .. "L/" .. tostring(idx + 1) .. "R",
+                label = tostring(idx + 1),
                 paired = 2,
                 inputBus = g.inputBus,
                 inputHatch = g.inputHatch,

@@ -132,7 +132,7 @@ function ui.draw(mon, state)
         end
         local label = st.lastRecipe or "-"
         -- index is pair id (1,2,3…) = NL+NR sharing one hatch set
-        local line = string.format("%dLR %d/%d %s", st.index or i, inf, maxInf, label)
+        local line = string.format("%d %d/%d %s", st.index or i, inf, maxInf, label)
         writeAt(mon, 1, y, clip(line, w), color, w)
         y = y + 1
     end

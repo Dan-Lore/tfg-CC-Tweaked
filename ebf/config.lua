@@ -29,6 +29,9 @@ local function defaults()
         max_furnaces = 0,
         -- Hot ingots pulled per finished recipe (EBF dust→ingot is usually 1).
         hot_per_recipe = 1,
+        -- After input+output empty, keep up to `paired` sticky feeds this many
+        -- seconds (L+R still crafting); then clear so missed drains do not stick.
+        craft_grace = 8,
     }
 end
 
@@ -118,6 +121,10 @@ local function parseLine(cfg, line, lineNo)
     end
     if key == "fluid_per_recipe" then
         setNumber(cfg, "fluid_per_recipe", val, lineNo)
+        return
+    end
+    if key == "craft_grace" then
+        setNumber(cfg, "craft_grace", val, lineNo)
         return
     end
     error(("ebf.cfg line %s: unknown key %q"):format(tostring(lineNo), key))
