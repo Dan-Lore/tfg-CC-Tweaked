@@ -367,6 +367,21 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
+        name = "isNonEmpty sees dust and nitrogen",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_1", {})
+            A.falsy(recipe.isNonEmpty("gtceu:hv_buffer_1"))
+            addTankInv("gtceu:hv_buffer_2", {
+                [1] = { name = "gtceu:aluminium_dust", count = 1 },
+            }, {
+                { name = "gtceu:nitrogen", amount = 100 },
+            })
+            A.truthy(recipe.isNonEmpty("gtceu:hv_buffer_2"))
+        end,
+    },
+    {
         name = "pushRecipeUnits batches single-item stack",
         fn = function()
             stub.reset()

@@ -78,6 +78,11 @@ function recipe.hasContent(snap)
     return snap and snap.empty == false
 end
 
+--- Cheap non-empty check (list + tanks). Used for sticky AE buffer pick.
+function recipe.isNonEmpty(bufferName)
+    return recipe.hasContent(recipe.snapshot(bufferName))
+end
+
 function recipe.label(snap)
     if not snap or snap.empty then
         return "-"

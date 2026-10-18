@@ -8,6 +8,13 @@ globs:
 
 CC: Tweaked script for TerraFirmaGreg. Feeds atomic recipes from HV buffers into EBF hatch packs and drains outputs. Does **not** enable/disable the furnaces.
 
+## Architecture (mandatory)
+
+- Each AE **pattern provider** holds a **unique** recipe set (not duplicated across providers).
+- Identical crafts in one order (e.g. 100 Al) arrive **sequentially into one** `hv_buffer` (blocking until empty).
+- Therefore: **sticky active buffer** → fan-out to furnace packs. Do **not** rescan every buffer every push.
+- Duplicating the same patterns on many providers makes CC pointless — AE can push straight into hatches.
+
 ## Layout
 
 - Monitor: top (2 high × 1 wide)
@@ -20,14 +27,11 @@ CC: Tweaked script for TerraFirmaGreg. Feeds atomic recipes from HV buffers into
 
 ## Behaviour
 
-- Snapshot / push recipe units; single-item stacks split by `items_per_recipe`
-- Sticky `inflight`; **spread** least-loaded across packs (all pairs busy)
-- Batch-push dust-only stacks; if buffer has fluid (N2), push exactly one recipe (item+fluid)
-- AE buffers with “block until empty” need full recipe clear — always read `tanks()`
-- `max_inflight` default **8** per pack
-- Monitor X/N = items in input bus (not sticky); sticky only limits feeding
-- Reconcile: empty bus+output → clear sticky after `craft_grace` (default 8s)
-- Drain: hot → hot_sink; rest → ae_sink
+- Stick to the non-empty AE buffer; brief wait for same-buffer refill before scanning others
+- Spread sticky `inflight` across packs (least-loaded); one recipe push when fluids present (dust+N2)
+- Monitor X/N = items in input bus; sticky only limits feeding
+- Drain packs with `inflight>0`; rare full sweep for missed outputs
+- Reconcile sticky after `craft_grace` when I/O empty
 - Sequential modem I/O; idle ≥0.05s
 
 ## Deploy
@@ -36,4 +40,4 @@ CC: Tweaked script for TerraFirmaGreg. Feeds atomic recipes from HV buffers into
 python tools/bundle_project.py ebf
 ```
 
-Copy **both** `dist/ebf.lua` and `dist/ebf.cfg` onto the computer.
+Copy **both** `dist/ebf.lua` and `ebf.cfg` onto the computer.

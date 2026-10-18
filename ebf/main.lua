@@ -1,6 +1,10 @@
 -- Electric blast furnace recipe feeder (CC: Tweaked / TFG).
 -- Hatch index N = pair (N+1)L + (N+1)R sharing one set of 4 hatches.
 --
+-- Architecture: each pattern provider has a UNIQUE recipe set → one craft order
+-- (e.g. 100 Al) lands sequentially in ONE hv_buffer. Stick to that buffer and
+-- fan out to furnace packs; do not rescan every buffer/hatch every tick.
+--
 -- Bundle:  python tools/bundle_project.py ebf
 -- Deploy:  dist/ebf.lua + ebf.cfg
 
@@ -33,8 +37,10 @@ local booted = false
 local queueLabel = "-"
 local quietFed = 0
 local quietDone = 0
-local bufCursor = 1
 local packRr = 1
+-- Sticky AE buffer: 100 identical crafts refill the same buffer one-by-one.
+local activeBuf = nil
+local drainSweep = 0
 
 local function setStatus(msg, forcePrint)
     msg = msg or ""
@@ -70,6 +76,15 @@ local function totals()
     return fed, drained
 end
 
+local function anyInflight()
+    for i = 1, #packList do
+        if (packList[i].inflight or 0) > 0 then
+            return true
+        end
+    end
+    return false
+end
+
 local function refreshUi(force)
     local now = os.clock()
     if not force and (now - lastUiAt) < 2.0 then
@@ -80,7 +95,6 @@ local function refreshUi(force)
     local view = {}
     for i = 1, #packList do
         local st = packList[i]
-        -- Show items actually in the input bus, not sticky ghosts.
         view[i] = {
             index = st.pair or ((st.index or 0) + 1),
             inflight = furnace.bufferedUnits(st, itemsPer),
@@ -104,8 +118,9 @@ local function rescan(reason, showBoot)
     states = furnace.mergeStates(states, net.furnaces or {})
     packList = furnace.listByIndex(states)
     dirty = false
-    bufCursor = 1
     packRr = 1
+    activeBuf = nil
+    drainSweep = 0
     if reason then
         print("ebf: rescan (" .. tostring(reason) .. ")")
     end
@@ -137,99 +152,139 @@ local function flushEvents()
     net_watch.flushEvents("ebf_flush")
 end
 
-local function drainAll()
+--- Prefer sticky buffer; only scan all when we have no active source.
+local function resolveActiveBuffer(buffers)
+    buffers = buffers or {}
+    local n = #buffers
+    if n == 0 then
+        activeBuf = nil
+        return nil
+    end
+
+    if activeBuf then
+        local known = false
+        for i = 1, n do
+            if buffers[i] == activeBuf then
+                known = true
+                break
+            end
+        end
+        if known and recipe.isNonEmpty(activeBuf) then
+            return activeBuf
+        end
+        -- AE one-recipe lock: same buffer often refills next. Wait briefly.
+        if known then
+            for _ = 1, 6 do
+                sleep(0)
+                if recipe.isNonEmpty(activeBuf) then
+                    return activeBuf
+                end
+            end
+        end
+        activeBuf = nil
+    end
+
+    for i = 1, n do
+        local name = buffers[i]
+        if recipe.isNonEmpty(name) then
+            activeBuf = name
+            return activeBuf
+        end
+    end
+    return nil
+end
+
+--- Drain packs with work; rare full sweep catches missed outputs.
+local function drainPass(fullSweep)
     local hotPer = tonumber(config.hot_per_recipe) or 1
     local itemsPer = tonumber(config.items_per_recipe) or 1
     local grace = tonumber(config.craft_grace) or 8
     local done = 0
     for i = 1, #packList do
         local st = packList[i]
-        local _, _, _, d = furnace.drain(st, net.hotSink, net.aeSink, hotPer)
-        done = done + d
-        if (st.inflight or 0) > 0 then
-            done = done + furnace.reconcile(st, itemsPer, grace)
+        local busy = (st.inflight or 0) > 0
+        if fullSweep or busy then
+            local _, _, _, d = furnace.drain(st, net.hotSink, net.aeSink, hotPer)
+            done = done + d
+            if (st.inflight or 0) > 0 then
+                done = done + furnace.reconcile(st, itemsPer, grace)
+            end
         end
     end
     return done
 end
 
+--- Fan out from one sticky AE buffer across furnace packs (least-loaded).
 local function feedPass()
-    local maxInf = tonumber(config.max_inflight) or 6
+    local maxInf = tonumber(config.max_inflight) or 8
     local itemsPer = tonumber(config.items_per_recipe) or 1
     local fluidPer = tonumber(config.fluid_per_recipe) or 0
     local buffers = net.buffers or {}
-    local nBuf = #buffers
-    if nBuf == 0 then
+    if #buffers == 0 then
+        return 0
+    end
+
+    local buf = resolveActiveBuffer(buffers)
+    if not buf then
         return 0
     end
 
     local fed = 0
-    -- One batch per pack-visit; enough visits to top everyone up.
-    local maxVisits = math.max(8, #packList * 2)
+    local maxVisits = math.max(4, #packList)
 
     for _ = 1, maxVisits do
         local st
         st, packRr = furnace.pickTarget(states, maxInf, packList, packRr)
         if not st then
+            -- All packs full — keep sticky buf, wait for drain.
             break
         end
 
-        local room = maxInf - (st.inflight or 0)
-        if room < 1 then
-            break
-        end
-
-        local pushed = false
-        local busFull = false
-        local checked = 0
-        while checked < nBuf do
-            if bufCursor > nBuf then
-                bufCursor = 1
-            end
-            local buf = buffers[bufCursor]
-            bufCursor = bufCursor + 1
-            checked = checked + 1
-
-            -- Always read fluids (nitrogen). skip_fluids ignored on push path.
-            local ok, units, _, _, err, movedSnap = recipe.pushRecipeUnits(
-                buf,
-                st.inputBus,
-                st.inputHatch,
-                itemsPer,
-                fluidPer,
-                room,
-                false
-            )
-            if ok and (units or 0) > 0 then
-                st.inflight = (st.inflight or 0) + units
-                st.fed = (st.fed or 0) + units
-                st.lastFeedAt = furnace._nowSeconds()
-                st.lastRecipe = recipe.label(movedSnap)
-                st.lastError = nil
-                fed = fed + units
-                quietFed = quietFed + units
-                queueLabel = st.lastRecipe or queueLabel
-                pushed = true
-                break
-            elseif err and err ~= "empty" then
-                st.lastError = err
-                if tostring(err):find("stuck", 1, true) then
-                    -- Input bus full — skip pack this cycle, keep feeding others.
-                    st.inflight = maxInf
-                    busFull = true
+        local ok, units, _, _, err, movedSnap = recipe.pushRecipeUnits(
+            buf,
+            st.inputBus,
+            st.inputHatch,
+            itemsPer,
+            fluidPer,
+            1, -- AE lock: one full recipe (dust + N2) per push
+            false
+        )
+        if ok and (units or 0) > 0 then
+            st.inflight = (st.inflight or 0) + units
+            st.fed = (st.fed or 0) + units
+            st.lastFeedAt = furnace._nowSeconds()
+            st.lastRecipe = recipe.label(movedSnap)
+            st.lastError = nil
+            fed = fed + units
+            quietFed = quietFed + units
+            queueLabel = st.lastRecipe or queueLabel
+            -- Buffer emptied; AE may refill the same one — stay sticky, re-resolve.
+            if not recipe.isNonEmpty(buf) then
+                local again = resolveActiveBuffer(buffers)
+                if not again then
                     break
                 end
+                buf = again
+            end
+        elseif err and err ~= "empty" then
+            st.lastError = err
+            if tostring(err):find("stuck", 1, true) then
+                st.inflight = maxInf
+            else
                 setStatus("push fail " .. tostring(st.label) .. ": " .. tostring(err), true)
                 break
             end
-        end
-
-        if not pushed and not busFull then
-            break
+        else
+            -- empty: try sticky wait / other buffers once
+            activeBuf = nil
+            buf = resolveActiveBuffer(buffers)
+            if not buf then
+                break
+            end
         end
     end
 
-    if fed == 0 then
+    if fed == 0 and not activeBuf then
         queueLabel = "-"
     end
     return fed
@@ -242,9 +297,10 @@ local function tick()
     end
 
     local worked = false
-    -- A few drain/feed rounds per wake; batch pushes keep modem traffic low.
-    for _ = 1, 6 do
-        local done = drainAll()
+    for _ = 1, 8 do
+        drainSweep = drainSweep + 1
+        local fullSweep = (drainSweep % 24 == 0) or not anyInflight()
+        local done = drainPass(fullSweep)
         if done > 0 then
             quietDone = quietDone + done
             worked = true
@@ -269,6 +325,8 @@ local function tick()
         local st = furnace.pickTarget(states, config.max_inflight, packList, packRr)
         if not st then
             setStatus("full — waiting on outputs")
+        elseif activeBuf then
+            setStatus("waiting AE refill " .. tostring(activeBuf))
         else
             setStatus("idle — waiting for recipes")
         end
@@ -282,9 +340,8 @@ print(("ebf: cfg %s%s"):format(
     tostring(cfgPath),
     cfgLoaded and " (loaded)" or " (defaults)"
 ))
-print(("ebf: max_inflight=%s items_per_recipe=%s (batch + spread)"):format(
-    tostring(config.max_inflight),
-    tostring(config.items_per_recipe or 1)
+print(("ebf: max_inflight=%s sticky-buffer fan-out"):format(
+    tostring(config.max_inflight)
 ))
 rescan("start", true)
 flushEvents()
