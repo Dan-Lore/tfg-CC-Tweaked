@@ -153,7 +153,8 @@ local function flushEvents()
 end
 
 --- Prefer sticky buffer; only scan all when we have no active source.
-local function resolveActiveBuffer(buffers)
+-- waitRefills: short yields for AE block-until-empty refill of the same buffer.
+local function resolveActiveBuffer(buffers, waitRefills)
     buffers = buffers or {}
     local n = #buffers
     if n == 0 then
@@ -172,9 +173,8 @@ local function resolveActiveBuffer(buffers)
         if known and recipe.isNonEmpty(activeBuf) then
             return activeBuf
         end
-        -- AE one-recipe lock: same buffer often refills next. Wait briefly.
-        if known then
-            for _ = 1, 6 do
+        if known and waitRefills then
+            for _ = 1, 2 do
                 sleep(0)
                 if recipe.isNonEmpty(activeBuf) then
                     return activeBuf
@@ -198,7 +198,7 @@ end
 local function drainPass(fullSweep)
     local hotPer = tonumber(config.hot_per_recipe) or 1
     local itemsPer = tonumber(config.items_per_recipe) or 1
-    local grace = tonumber(config.craft_grace) or 8
+    local grace = tonumber(config.craft_grace) or 90
     local done = 0
     for i = 1, #packList do
         local st = packList[i]
@@ -206,9 +206,8 @@ local function drainPass(fullSweep)
         if fullSweep or busy then
             local _, _, _, d = furnace.drain(st, net.hotSink, net.aeSink, hotPer)
             done = done + d
-            if (st.inflight or 0) > 0 then
-                done = done + furnace.reconcile(st, itemsPer, grace)
-            end
+            -- Reconcile only after grace (see furnace.reconcile); safe to call always.
+            done = done + furnace.reconcile(st, itemsPer, grace)
         end
     end
     return done
@@ -224,7 +223,7 @@ local function feedPass()
         return 0
     end
 
-    local buf = resolveActiveBuffer(buffers)
+    local buf = resolveActiveBuffer(buffers, true)
     if not buf then
         return 0
     end
@@ -258,9 +257,9 @@ local function feedPass()
             fed = fed + units
             quietFed = quietFed + units
             queueLabel = st.lastRecipe or queueLabel
-            -- Buffer emptied; AE may refill the same one — stay sticky, re-resolve.
+            -- Same buffer often refills next; short wait only, no full rescan spam.
             if not recipe.isNonEmpty(buf) then
-                local again = resolveActiveBuffer(buffers)
+                local again = resolveActiveBuffer(buffers, true)
                 if not again then
                     break
                 end
@@ -275,9 +274,8 @@ local function feedPass()
                 break
             end
         else
-            -- empty: try sticky wait / other buffers once
-            activeBuf = nil
-            buf = resolveActiveBuffer(buffers)
+            -- empty: sticky wait once, then scan others
+            buf = resolveActiveBuffer(buffers, true)
             if not buf then
                 break
             end

@@ -134,22 +134,25 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "pickTarget prefers least loaded",
+        name = "pickTarget finishes L/R pair before opening empty",
         fn = function()
             local states = {
-                [0] = { index = 0, inflight = 2, id = "ebf_0" },
-                [1] = { index = 1, inflight = 0, id = "ebf_1" },
-                [2] = { index = 2, inflight = 1, id = "ebf_2" },
+                [0] = { index = 0, inflight = 2, paired = 2, id = "ebf_0" },
+                [1] = { index = 1, inflight = 0, paired = 2, id = "ebf_1" },
+                [2] = { index = 2, inflight = 1, paired = 2, id = "ebf_2" },
             }
+            -- Incomplete pair (2) beats empty (1).
             local t = furnace.pickTarget(states, 3)
+            A.eq(t.index, 2)
+            states[2].inflight = 2
+            -- All pairs at >=2 with room: empty pack opens next.
+            t = furnace.pickTarget(states, 3)
             A.eq(t.index, 1)
             states[1].inflight = 3
             t = furnace.pickTarget(states, 3)
-            A.eq(t.index, 2)
-            states[2].inflight = 3
-            t = furnace.pickTarget(states, 3)
             A.eq(t.index, 0)
             states[0].inflight = 3
+            states[2].inflight = 3
             A.isNil(furnace.pickTarget(states, 3))
         end,
     },
@@ -258,14 +261,14 @@ A.suite("ebf discover / recipe / furnace", {
             })
             st.inflight = 5
             st.lastFeedAt = 1000
-            local drop = furnace.reconcile(st, 1, 8, 1020)
+            local drop = furnace.reconcile(st, 1, 90, 1200)
             A.eq(drop, 5)
             A.eq(st.inflight, 0)
             A.eq(st.drained, 5)
         end,
     },
     {
-        name = "reconcile keeps paired sticky during craft grace",
+        name = "reconcile leaves sticky untouched during craft grace",
         fn = function()
             stub.reset()
             stub.install()
@@ -279,9 +282,9 @@ A.suite("ebf discover / recipe / furnace", {
             })
             st.inflight = 5
             st.lastFeedAt = 1000
-            local drop = furnace.reconcile(st, 1, 8, 1003)
-            A.eq(drop, 3)
-            A.eq(st.inflight, 2)
+            local drop = furnace.reconcile(st, 1, 90, 1050)
+            A.eq(drop, 0)
+            A.eq(st.inflight, 5)
         end,
     },
     {
@@ -298,13 +301,13 @@ A.suite("ebf discover / recipe / furnace", {
                 outputBus = "gtceu:lv_output_bus_0",
             })
             st.inflight = 5
-            local drop = furnace.reconcile(st, 1, 8, 50)
+            local drop = furnace.reconcile(st, 1, 90, 50)
             A.eq(drop, 5)
             A.eq(st.inflight, 0)
         end,
     },
     {
-        name = "reconcile caps sticky to buffered only",
+        name = "reconcile caps sticky to buffered after grace",
         fn = function()
             stub.reset()
             stub.install()
@@ -319,7 +322,8 @@ A.suite("ebf discover / recipe / furnace", {
                 outputBus = "gtceu:lv_output_bus_0",
             })
             st.inflight = 6
-            local drop = furnace.reconcile(st, 1, 8)
+            st.lastFeedAt = 1000
+            local drop = furnace.reconcile(st, 1, 90, 1200)
             A.eq(drop, 3)
             A.eq(st.inflight, 3)
         end,
@@ -348,22 +352,22 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "pickTarget round-robins equal loads",
+        name = "pickTarget completes pair then opens next empty",
         fn = function()
             local states = {
-                [0] = { index = 0, inflight = 0 },
-                [1] = { index = 1, inflight = 0 },
-                [2] = { index = 2, inflight = 0 },
+                [0] = { index = 0, inflight = 0, paired = 2 },
+                [1] = { index = 1, inflight = 0, paired = 2 },
+                [2] = { index = 2, inflight = 0, paired = 2 },
             }
             local list = furnace.listByIndex(states)
             local a, rr = furnace.pickTarget(states, 6, list, 1)
             A.eq(a.index, 0)
             states[0].inflight = 1
             local b, rr2 = furnace.pickTarget(states, 6, list, rr)
-            A.eq(b.index, 1)
-            states[1].inflight = 1
+            A.eq(b.index, 0)
+            states[0].inflight = 2
             local c = furnace.pickTarget(states, 6, list, rr2)
-            A.eq(c.index, 2)
+            A.eq(c.index, 1)
         end,
     },
     {
@@ -439,7 +443,7 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "feed spreads units across hatch packs",
+        name = "feed completes L/R pair on same hatch before next",
         fn = function()
             stub.reset()
             stub.install()
@@ -473,10 +477,10 @@ A.suite("ebf discover / recipe / furnace", {
 
             local b = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
             A.truthy(b)
-            A.eq(b.index, 1)
-            A.eq(states[1].inflight, 1)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
+            A.eq(b.index, 0)
+            A.eq(states[0].inflight, 2)
+            A.eq(states[1].inflight, 0)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 2)
         end,
     },
     {
@@ -516,7 +520,7 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "second feed goes to least-loaded pack",
+        name = "second feed completes pair on same pack",
         fn = function()
             stub.reset()
             stub.install()
@@ -546,10 +550,10 @@ A.suite("ebf discover / recipe / furnace", {
 
             local st = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
             A.truthy(st)
-            A.eq(st.index, 1)
-            A.eq(states[1].inflight, 1)
-            A.eq(states[0].inflight, 1)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
+            A.eq(st.index, 0)
+            A.eq(states[0].inflight, 2)
+            A.eq(states[1].inflight, 0)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
         end,
     },
 })

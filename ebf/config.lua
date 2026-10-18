@@ -29,9 +29,9 @@ local function defaults()
         max_furnaces = 0,
         -- Hot ingots pulled per finished recipe (EBF dust→ingot is usually 1).
         hot_per_recipe = 1,
-        -- After input+output empty, keep up to `paired` sticky feeds this many
-        -- seconds (L+R still crafting); then clear so missed drains do not stick.
-        craft_grace = 8,
+        -- After last feed, leave sticky alone this many seconds (EBF craft time).
+        -- Too short → mid-smelt clear → next wave feeds 1/pack and idles L or R.
+        craft_grace = 90,
         -- Kept for cfg compat; pushes always read tanks (N2 with AE one-recipe lock).
         skip_fluids = false,
     }

@@ -100,8 +100,11 @@ function furnace.listByIndex(stateMap)
     return list
 end
 
---- Spread across packs (least sticky load) so all L/R pairs run in parallel.
--- Among ties prefer round-robin from rrCursor, then lowest index.
+--- One hatch pack = L+R. Pick order:
+-- 1) packs with 0 < inflight < paired (finish the sibling furnace)
+-- 2) empty packs (bring another L+R pair online)
+-- 3) packs with paired <= inflight < max (buffer)
+-- Within a tier: least load, then round-robin from rrCursor.
 -- Returns st, newRrCursor
 function furnace.pickTarget(stateMap, maxInflight, packList, rrCursor)
     maxInflight = tonumber(maxInflight) or 6
@@ -115,25 +118,52 @@ function furnace.pickTarget(stateMap, maxInflight, packList, rrCursor)
         rrCursor = 1
     end
 
-    local bestLoad = nil
-    for i = 1, n do
-        local inf = packList[i].inflight or 0
-        if inf < maxInflight then
-            if not bestLoad or inf < bestLoad then
-                bestLoad = inf
+    local function pickInTier(pred)
+        local bestLoad = nil
+        for i = 1, n do
+            local st = packList[i]
+            local inf = st.inflight or 0
+            if inf < maxInflight and pred(st, inf) then
+                if not bestLoad or inf < bestLoad then
+                    bestLoad = inf
+                end
             end
         end
-    end
-    if bestLoad == nil then
-        return nil, rrCursor
+        if bestLoad == nil then
+            return nil
+        end
+        for offset = 0, n - 1 do
+            local i = ((rrCursor - 1 + offset) % n) + 1
+            local st = packList[i]
+            local inf = st.inflight or 0
+            if inf == bestLoad and inf < maxInflight and pred(st, inf) then
+                return st, (i % n) + 1
+            end
+        end
+        return nil
     end
 
-    for offset = 0, n - 1 do
-        local i = ((rrCursor - 1 + offset) % n) + 1
-        local st = packList[i]
-        if (st.inflight or 0) == bestLoad then
-            return st, (i % n) + 1
-        end
+    local paired = 2
+    local st, nextRr = pickInTier(function(s, inf)
+        local p = math.max(1, tonumber(s.paired) or paired)
+        return inf > 0 and inf < p
+    end)
+    if st then
+        return st, nextRr
+    end
+
+    st, nextRr = pickInTier(function(_, inf)
+        return inf == 0
+    end)
+    if st then
+        return st, nextRr
+    end
+
+    st, nextRr = pickInTier(function(_, inf)
+        return inf >= 0
+    end)
+    if st then
+        return st, nextRr
     end
     return nil, rrCursor
 end
@@ -244,32 +274,28 @@ local function outputItemCount(st)
 end
 
 --- Cap sticky inflight used for feed limiting (UI uses bufferedUnits separately).
--- Empty input+output → drop sticky (missed drains). Brief craft_grace after a
--- feed keeps up to `paired` so L+R mid-craft does not get immediately re-flooded.
+-- While craft_grace after last feed: do NOT touch sticky (drain alone decrements).
+-- Early clear was zeroing packs mid-smelt → next wave fed 1/pack and idled L or R.
+-- After grace with empty I/O: snap to bus count (usually 0).
 -- optional `now` (seconds) for tests.
 function furnace.reconcile(st, itemsPerRecipe, craftGrace, now)
     if not st then
         return 0
     end
-    local paired = math.max(1, tonumber(st.paired) or 2)
-    craftGrace = tonumber(craftGrace) or 8
+    craftGrace = tonumber(craftGrace) or 90
     now = tonumber(now) or nowSeconds()
+    local feedAt = tonumber(st.lastFeedAt)
+    if feedAt and (now - feedAt) < craftGrace then
+        return 0
+    end
+
     local buffered = furnace.bufferedUnits(st, itemsPerRecipe)
     local outN = outputItemCount(st)
-    local credit
-    if buffered > 0 then
-        -- Only what still sits in the bus (no +paired bonus — that stuck UI at 3/6).
-        credit = buffered
-    elseif outN > 0 then
-        credit = math.max(tonumber(st.inflight) or 0, 1)
-    else
-        local feedAt = tonumber(st.lastFeedAt)
-        if feedAt and (now - feedAt) < craftGrace then
-            credit = math.min(tonumber(st.inflight) or 0, paired)
-        else
-            credit = 0
-        end
+    local credit = buffered
+    if outN > 0 then
+        credit = math.max(buffered, 1)
     end
+
     local inf = tonumber(st.inflight) or 0
     if inf <= credit then
         return 0
