@@ -21,14 +21,14 @@ CC: Tweaked script for TerraFirmaGreg. Feeds atomic recipes from HV buffers into
 ## Behaviour
 
 - Snapshot / push recipe units; single-item stacks split by `items_per_recipe`
-- Sticky `inflight`; fill one hatch pack toward `max_inflight` before opening the next
-  (L+R share buses — spreading 1 recipe per pack leaves one furnace idle)
-- `max_inflight` default **6** per pack (2 crafting + 4 buffered for the L+R pair)
-- Monitor X/6 = items in input bus (not sticky); sticky only limits feeding
+- Sticky `inflight`; **spread** least-loaded across packs (all pairs busy)
+- Batch-push dust-only stacks; if buffer has fluid (N2), push exactly one recipe (item+fluid)
+- AE buffers with “block until empty” need full recipe clear — always read `tanks()`
+- `max_inflight` default **8** per pack
+- Monitor X/N = items in input bus (not sticky); sticky only limits feeding
 - Reconcile: empty bus+output → clear sticky after `craft_grace` (default 8s)
 - Drain: hot → hot_sink; rest → ae_sink
 - Sequential modem I/O; idle ≥0.05s
-- Monitor lines: `1 0/6 alumin.` (pair id, no LR suffix)
 
 ## Deploy
 

@@ -32,7 +32,8 @@ local function buildSnapFromMaps(items, fluids)
     return snap
 end
 
-function recipe.inspect(bufferName)
+--- skipFluids: skip tanks() (faster for dust-only Al runs).
+function recipe.inspect(bufferName, skipFluids)
     local empty = buildSnapFromMaps({}, {})
     if not bufferName or not peripheral.isPresent(bufferName) then
         return empty, nil, nil
@@ -51,7 +52,7 @@ function recipe.inspect(bufferName)
     end
 
     local fluids = {}
-    if type(inv.tanks) == "function" then
+    if not skipFluids and type(inv.tanks) == "function" then
         local ok, tanks = pcall(inv.tanks)
         if ok and type(tanks) == "table" then
             for _, t in pairs(tanks) do
@@ -66,7 +67,7 @@ function recipe.inspect(bufferName)
 end
 
 function recipe.snapshot(bufferName)
-    return (recipe.inspect(bufferName))
+    return (recipe.inspect(bufferName, false))
 end
 
 function recipe.isEmpty(snap)
@@ -222,23 +223,60 @@ local function pushWantedItems(inv, listed, inputBus, wants)
     return true, movedItems, movedItemMap, nil
 end
 
---- Push exactly one recipe unit from buffer → inputs.
--- Returns ok, movedItems, movedFluids, err, movedSnap
-function recipe.pushOneRecipe(bufferName, inputBus, inputHatch, itemsPerRecipe, fluidPerRecipe)
-    local snap, listed, inv = recipe.inspect(bufferName)
+--- Push up to maxUnits recipe units. Single-item stacks = one pushItems.
+-- Returns ok, units, movedItems, movedFluids, err, movedSnap
+function recipe.pushRecipeUnits(
+    bufferName,
+    inputBus,
+    inputHatch,
+    itemsPerRecipe,
+    fluidPerRecipe,
+    maxUnits,
+    skipFluids
+)
+    maxUnits = math.max(1, math.floor(tonumber(maxUnits) or 1))
+    itemsPerRecipe = math.max(1, tonumber(itemsPerRecipe) or 1)
+    -- Always read tanks: AE one-recipe buffers hold nitrogen with the dust.
+    -- Skipping fluids left N2 behind → buffer never emptied → AE lock stalled.
+    local snap, listed, inv = recipe.inspect(bufferName, false)
     if recipe.isEmpty(snap) then
-        return false, 0, 0, "empty", nil
+        return false, 0, 0, 0, "empty", nil
     end
     if not inputBus or not peripheral.isPresent(inputBus) then
-        return false, 0, 0, "no input bus", nil
+        return false, 0, 0, 0, "no input bus", nil
     end
     if not inv or type(inv.pushItems) ~= "function" then
-        return false, 0, 0, "bad buffer", nil
+        return false, 0, 0, 0, "bad buffer", nil
     end
 
-    local itemWants, okPlan = planItemWants(snap, itemsPerRecipe)
-    if not okPlan or (countTypes(itemWants) == 0 and countTypes(snap.fluids) == 0) then
-        return false, 0, 0, "empty", nil
+    local nItemTypes = countTypes(snap.items)
+    local nFluids = countTypes(snap.fluids)
+    -- Fluid recipes must move as one atomic unit (do not batch dust ahead of N2).
+    if nFluids > 0 then
+        maxUnits = 1
+    end
+
+    local itemWants = {}
+    local units = 1
+
+    if nItemTypes == 1 then
+        local name, count
+        for n, c in pairs(snap.items) do
+            name, count = n, c
+        end
+        units = math.min(maxUnits, math.floor((count or 0) / itemsPerRecipe))
+        if units < 1 then
+            return false, 0, 0, 0, "empty", nil
+        end
+        itemWants[name] = units * itemsPerRecipe
+    elseif nItemTypes > 1 then
+        -- Multi-item AE dump: one whole buffer = one recipe.
+        units = 1
+        for name, count in pairs(snap.items) do
+            itemWants[name] = count
+        end
+    elseif nFluids == 0 then
+        return false, 0, 0, 0, "empty", nil
     end
 
     local okItems, movedItems, movedItemMap, errItems = pushWantedItems(
@@ -248,15 +286,37 @@ function recipe.pushOneRecipe(bufferName, inputBus, inputHatch, itemsPerRecipe, 
         itemWants
     )
     if not okItems then
-        return false, movedItems, 0, errItems, nil
+        return false, 0, movedItems, 0, errItems, nil
     end
 
-    local fluidWants = planFluidWants(snap, itemWants, itemsPerRecipe, fluidPerRecipe)
+    -- With maxUnits forced to 1 when fluids exist, take all fluid in the buffer
+    -- (AE lock = one full recipe). Otherwise scale by fluid_per_recipe / proportion.
+    local fluidWants
+    if nFluids > 0 and maxUnits == 1 and (tonumber(fluidPerRecipe) or 0) <= 0 then
+        fluidWants = {}
+        for name, amount in pairs(snap.fluids) do
+            if (amount or 0) > 0 then
+                fluidWants[name] = amount
+            end
+        end
+    elseif nItemTypes == 1 and (tonumber(fluidPerRecipe) or 0) > 0 then
+        fluidWants = {}
+        local per = tonumber(fluidPerRecipe) or 0
+        for name, amount in pairs(snap.fluids) do
+            local want = math.min(amount, per * units)
+            if want > 0 then
+                fluidWants[name] = want
+            end
+        end
+    else
+        fluidWants = planFluidWants(snap, itemWants, itemsPerRecipe, fluidPerRecipe)
+    end
+
     local movedFluids = 0
     local movedFluidMap = {}
     if countTypes(fluidWants) > 0 then
         if not inputHatch or not peripheral.isPresent(inputHatch) then
-            return false, movedItems, 0, "no input hatch", nil
+            return false, 0, movedItems, 0, "no input hatch", nil
         end
         for name, want in pairs(fluidWants) do
             local got = transfer.fluid(bufferName, inputHatch, name, want) or 0
@@ -265,12 +325,27 @@ function recipe.pushOneRecipe(bufferName, inputBus, inputHatch, itemsPerRecipe, 
                 movedFluidMap[name] = (movedFluidMap[name] or 0) + got
             end
             if got < want then
-                return false, movedItems, movedFluids, "fluid stuck: " .. name, nil
+                return false, 0, movedItems, movedFluids, "fluid stuck: " .. name, nil
             end
         end
     end
 
-    return true, movedItems, movedFluids, nil, buildSnapFromMaps(movedItemMap, movedFluidMap)
+    return true, units, movedItems, movedFluids, nil, buildSnapFromMaps(movedItemMap, movedFluidMap)
+end
+
+--- Push exactly one recipe unit from buffer → inputs.
+-- Returns ok, movedItems, movedFluids, err, movedSnap
+function recipe.pushOneRecipe(bufferName, inputBus, inputHatch, itemsPerRecipe, fluidPerRecipe)
+    local ok, _, mi, mf, err, snap = recipe.pushRecipeUnits(
+        bufferName,
+        inputBus,
+        inputHatch,
+        itemsPerRecipe,
+        fluidPerRecipe,
+        1,
+        false
+    )
+    return ok, mi, mf, err, snap
 end
 
 --- Push everything currently in the buffer (legacy / multi-item AE dump).

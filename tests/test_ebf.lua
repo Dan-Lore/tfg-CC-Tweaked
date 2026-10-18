@@ -48,7 +48,7 @@ A.suite("ebf discover / recipe / furnace", {
             stub.setRunningProgram("/ebf/ebf.lua")
             local cfg = configMod.load("/missing_ebf.cfg")
             A.eq(cfg.hot_sink, "gtceu:hv_buffer_0")
-            A.eq(cfg.max_inflight, 6)
+            A.eq(cfg.max_inflight, 8)
             A.eq(cfg.recipe_buffer_min, 1)
         end,
     },
@@ -134,23 +134,22 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "pickTarget concentrates on open pack",
+        name = "pickTarget prefers least loaded",
         fn = function()
             local states = {
                 [0] = { index = 0, inflight = 2, id = "ebf_0" },
                 [1] = { index = 1, inflight = 0, id = "ebf_1" },
                 [2] = { index = 2, inflight = 1, id = "ebf_2" },
             }
-            -- Prefer already-open pack 0 over empty pack 1 (L+R share bus).
             local t = furnace.pickTarget(states, 3)
-            A.eq(t.index, 0)
-            states[0].inflight = 3
+            A.eq(t.index, 1)
+            states[1].inflight = 3
             t = furnace.pickTarget(states, 3)
             A.eq(t.index, 2)
             states[2].inflight = 3
             t = furnace.pickTarget(states, 3)
-            A.eq(t.index, 1)
-            states[1].inflight = 3
+            A.eq(t.index, 0)
+            states[0].inflight = 3
             A.isNil(furnace.pickTarget(states, 3))
         end,
     },
@@ -349,7 +348,7 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "pickTarget fills one pack before opening next",
+        name = "pickTarget round-robins equal loads",
         fn = function()
             local states = {
                 [0] = { index = 0, inflight = 0 },
@@ -357,18 +356,75 @@ A.suite("ebf discover / recipe / furnace", {
                 [2] = { index = 2, inflight = 0 },
             }
             local list = furnace.listByIndex(states)
-            local a = furnace.pickTarget(states, 6, list, 1)
+            local a, rr = furnace.pickTarget(states, 6, list, 1)
             A.eq(a.index, 0)
             states[0].inflight = 1
-            local b = furnace.pickTarget(states, 6, list, 1)
-            A.eq(b.index, 0)
-            states[0].inflight = 6
-            local c = furnace.pickTarget(states, 6, list, 1)
-            A.eq(c.index, 1)
+            local b, rr2 = furnace.pickTarget(states, 6, list, rr)
+            A.eq(b.index, 1)
+            states[1].inflight = 1
+            local c = furnace.pickTarget(states, 6, list, rr2)
+            A.eq(c.index, 2)
         end,
     },
     {
-        name = "feed fills same hatch pack before next",
+        name = "pushRecipeUnits batches single-item stack",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:aluminium_dust", count = 5 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+
+            local ok, units, mi = recipe.pushRecipeUnits(
+                "gtceu:hv_buffer_1",
+                "gtceu:lv_input_bus_0",
+                nil,
+                1,
+                0,
+                4,
+                true
+            )
+            A.truthy(ok)
+            A.eq(units, 4)
+            A.eq(mi, 4)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 4)
+            A.eq(recipe.snapshot("gtceu:hv_buffer_1").items["gtceu:aluminium_dust"], 1)
+        end,
+    },
+    {
+        name = "pushRecipeUnits moves nitrogen with dust (AE one-recipe lock)",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addTankInv("gtceu:hv_buffer_1", {
+                [1] = { name = "gtceu:aluminium_dust", count = 1 },
+            }, {
+                { name = "gtceu:nitrogen", amount = 1000 },
+            })
+            addInv("gtceu:lv_input_bus_0", {})
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
+
+            local ok, units, mi, mf, err = recipe.pushRecipeUnits(
+                "gtceu:hv_buffer_1",
+                "gtceu:lv_input_bus_0",
+                "gtceu:ev_input_hatch_4x_0",
+                1,
+                0,
+                8,
+                true -- skip flag must not drop fluids
+            )
+            A.truthy(ok, err)
+            A.eq(units, 1)
+            A.eq(mi, 1)
+            A.eq(mf, 1000)
+            A.truthy(recipe.isEmpty(recipe.snapshot("gtceu:hv_buffer_1")))
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
+            A.eq(recipe.snapshot("gtceu:ev_input_hatch_4x_0").fluids["gtceu:nitrogen"], 1000)
+        end,
+    },
+    {
+        name = "feed spreads units across hatch packs",
         fn = function()
             stub.reset()
             stub.install()
@@ -402,11 +458,10 @@ A.suite("ebf discover / recipe / furnace", {
 
             local b = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
             A.truthy(b)
-            A.eq(b.index, 0)
-            A.eq(states[0].inflight, 2)
-            A.eq(states[1].inflight, 0)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 2)
-            A.isNil(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"])
+            A.eq(b.index, 1)
+            A.eq(states[1].inflight, 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
         end,
     },
     {
@@ -446,7 +501,7 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
-        name = "second feed stays on open pack",
+        name = "second feed goes to least-loaded pack",
         fn = function()
             stub.reset()
             stub.install()
@@ -476,10 +531,10 @@ A.suite("ebf discover / recipe / furnace", {
 
             local st = furnace.feedOne(states, "gtceu:hv_buffer_1", 6)
             A.truthy(st)
-            A.eq(st.index, 0)
-            A.eq(states[0].inflight, 2)
-            A.eq(states[1].inflight, 0)
-            A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
+            A.eq(st.index, 1)
+            A.eq(states[1].inflight, 1)
+            A.eq(states[0].inflight, 1)
+            A.eq(recipe.snapshot("gtceu:lv_input_bus_1").items["gtceu:aluminium_dust"], 1)
         end,
     },
 })

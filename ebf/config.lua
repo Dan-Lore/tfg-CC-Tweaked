@@ -19,8 +19,8 @@ local function defaults()
         output_bus_prefix = "gtceu:lv_output_bus",
         output_hatch_prefix = "gtceu:lv_output_hatch",
 
-        -- Per hatch pack (furnaces NL+NR sharing hatches): 2 craft + 4 buffer = 6.
-        max_inflight = 6,
+        -- Per hatch pack (furnaces NL+NR sharing hatches): 2 craft + buffer.
+        max_inflight = 8,
         -- Item units per recipe when buffer holds a single item type (Al dust = 1).
         items_per_recipe = 1,
         -- Fluid mB per recipe (0 = scale with items_per_recipe / stack size).
@@ -32,6 +32,8 @@ local function defaults()
         -- After input+output empty, keep up to `paired` sticky feeds this many
         -- seconds (L+R still crafting); then clear so missed drains do not stick.
         craft_grace = 8,
+        -- Kept for cfg compat; pushes always read tanks (N2 with AE one-recipe lock).
+        skip_fluids = false,
     }
 end
 
@@ -125,6 +127,11 @@ local function parseLine(cfg, line, lineNo)
     end
     if key == "craft_grace" then
         setNumber(cfg, "craft_grace", val, lineNo)
+        return
+    end
+    if key == "skip_fluids" then
+        local v = tostring(val):lower()
+        cfg.skip_fluids = (v == "1" or v == "true" or v == "yes" or v == "on")
         return
     end
     error(("ebf.cfg line %s: unknown key %q"):format(tostring(lineNo), key))

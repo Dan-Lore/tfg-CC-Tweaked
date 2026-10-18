@@ -140,13 +140,15 @@ end
 local function drainAll()
     local hotPer = tonumber(config.hot_per_recipe) or 1
     local itemsPer = tonumber(config.items_per_recipe) or 1
-    local grace = tonumber(config.craft_grace) or 45
+    local grace = tonumber(config.craft_grace) or 8
     local done = 0
     for i = 1, #packList do
         local st = packList[i]
         local _, _, _, d = furnace.drain(st, net.hotSink, net.aeSink, hotPer)
         done = done + d
-        done = done + furnace.reconcile(st, itemsPer, grace)
+        if (st.inflight or 0) > 0 then
+            done = done + furnace.reconcile(st, itemsPer, grace)
+        end
     end
     return done
 end
@@ -162,16 +164,23 @@ local function feedPass()
     end
 
     local fed = 0
-    local maxPushes = math.max(8, #packList * maxInf)
+    -- One batch per pack-visit; enough visits to top everyone up.
+    local maxVisits = math.max(8, #packList * 2)
 
-    for _ = 1, maxPushes do
+    for _ = 1, maxVisits do
         local st
         st, packRr = furnace.pickTarget(states, maxInf, packList, packRr)
         if not st then
             break
         end
 
+        local room = maxInf - (st.inflight or 0)
+        if room < 1 then
+            break
+        end
+
         local pushed = false
+        local busFull = false
         local checked = 0
         while checked < nBuf do
             if bufCursor > nBuf then
@@ -181,32 +190,41 @@ local function feedPass()
             bufCursor = bufCursor + 1
             checked = checked + 1
 
-            local ok, _, _, err, movedSnap = recipe.pushOneRecipe(
+            -- Always read fluids (nitrogen). skip_fluids ignored on push path.
+            local ok, units, _, _, err, movedSnap = recipe.pushRecipeUnits(
                 buf,
                 st.inputBus,
                 st.inputHatch,
                 itemsPer,
-                fluidPer
+                fluidPer,
+                room,
+                false
             )
-            if ok then
-                st.inflight = (st.inflight or 0) + 1
-                st.fed = (st.fed or 0) + 1
+            if ok and (units or 0) > 0 then
+                st.inflight = (st.inflight or 0) + units
+                st.fed = (st.fed or 0) + units
                 st.lastFeedAt = furnace._nowSeconds()
                 st.lastRecipe = recipe.label(movedSnap)
                 st.lastError = nil
-                fed = fed + 1
-                quietFed = quietFed + 1
+                fed = fed + units
+                quietFed = quietFed + units
                 queueLabel = st.lastRecipe or queueLabel
                 pushed = true
                 break
             elseif err and err ~= "empty" then
                 st.lastError = err
+                if tostring(err):find("stuck", 1, true) then
+                    -- Input bus full — skip pack this cycle, keep feeding others.
+                    st.inflight = maxInf
+                    busFull = true
+                    break
+                end
                 setStatus("push fail " .. tostring(st.label) .. ": " .. tostring(err), true)
                 break
             end
         end
 
-        if not pushed then
+        if not pushed and not busFull then
             break
         end
     end
@@ -223,13 +241,23 @@ local function tick()
         return false
     end
 
-    -- One drain+feed per wake: a 64× loop re-flooded packs after sticky clear.
-    local done = drainAll()
-    if done > 0 then
-        quietDone = quietDone + done
+    local worked = false
+    -- A few drain/feed rounds per wake; batch pushes keep modem traffic low.
+    for _ = 1, 6 do
+        local done = drainAll()
+        if done > 0 then
+            quietDone = quietDone + done
+            worked = true
+        end
+        local fed = feedPass()
+        if fed > 0 then
+            worked = true
+        end
+        if fed == 0 and done == 0 then
+            break
+        end
+        sleep(0)
     end
-    local fed = feedPass()
-    local worked = fed > 0 or done > 0
 
     if quietFed > 0 or quietDone > 0 then
         if (os.clock() - lastStatusAt) >= 2 then
@@ -254,7 +282,7 @@ print(("ebf: cfg %s%s"):format(
     tostring(cfgPath),
     cfgLoaded and " (loaded)" or " (defaults)"
 ))
-print(("ebf: max_inflight=%s items_per_recipe=%s (fill pack before next)"):format(
+print(("ebf: max_inflight=%s items_per_recipe=%s (batch + spread)"):format(
     tostring(config.max_inflight),
     tostring(config.items_per_recipe or 1)
 ))

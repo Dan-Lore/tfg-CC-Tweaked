@@ -100,9 +100,9 @@ function furnace.listByIndex(stateMap)
     return list
 end
 
---- Fill an open pack before opening the next (L+R share one bus).
--- Prefer highest inflight under maxInflight (concentrate), then lowest index.
--- Returns st, rrCursor (cursor unused; kept for call-site compat)
+--- Spread across packs (least sticky load) so all L/R pairs run in parallel.
+-- Among ties prefer round-robin from rrCursor, then lowest index.
+-- Returns st, newRrCursor
 function furnace.pickTarget(stateMap, maxInflight, packList, rrCursor)
     maxInflight = tonumber(maxInflight) or 6
     packList = packList or furnace.listByIndex(stateMap)
@@ -110,23 +110,32 @@ function furnace.pickTarget(stateMap, maxInflight, packList, rrCursor)
     if n == 0 then
         return nil, rrCursor or 1
     end
+    rrCursor = tonumber(rrCursor) or 1
+    if rrCursor < 1 or rrCursor > n then
+        rrCursor = 1
+    end
 
-    local best = nil
-    local bestInf = -1
+    local bestLoad = nil
     for i = 1, n do
-        local st = packList[i]
-        local inf = st.inflight or 0
+        local inf = packList[i].inflight or 0
         if inf < maxInflight then
-            if not best
-                or inf > bestInf
-                or (inf == bestInf and (st.index or 0) < (best.index or 0))
-            then
-                best = st
-                bestInf = inf
+            if not bestLoad or inf < bestLoad then
+                bestLoad = inf
             end
         end
     end
-    return best, rrCursor or 1
+    if bestLoad == nil then
+        return nil, rrCursor
+    end
+
+    for offset = 0, n - 1 do
+        local i = ((rrCursor - 1 + offset) % n) + 1
+        local st = packList[i]
+        if (st.inflight or 0) == bestLoad then
+            return st, (i % n) + 1
+        end
+    end
+    return nil, rrCursor
 end
 
 local function drainInv(fromName, hotSink, aeSink, cached)
