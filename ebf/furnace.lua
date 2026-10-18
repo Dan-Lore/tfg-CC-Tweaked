@@ -17,6 +17,36 @@ local function isHotIngot(itemName)
     return short:find("ingot") ~= nil
 end
 
+local function isRealItemName(name)
+    if type(name) ~= "string" or name == "" then
+        return false
+    end
+    if name == "minecraft:air" or name == "minecraft:empty" then
+        return false
+    end
+    return name:find(":", 1, true) ~= nil
+end
+
+--- GT puts the integrated/programmable circuit in the bus inventory; ignore it.
+local function isConfigCircuit(name)
+    if not isRealItemName(name) then
+        return false
+    end
+    local short = name:match("([^:/]+)$") or name
+    short = short:lower()
+    if short:find("circuit", 1, true) then
+        return true
+    end
+    if short:find("programmable", 1, true) then
+        return true
+    end
+    return false
+end
+
+local function isCargoItem(name)
+    return isRealItemName(name) and not isConfigCircuit(name)
+end
+
 local function invItemCount(name)
     if not name or not peripheral.isPresent(name) then
         return 0
@@ -31,8 +61,11 @@ local function invItemCount(name)
     end
     local n = 0
     for _, item in pairs(listed) do
-        if item and (item.count or 0) > 0 then
-            n = n + (item.count or 0)
+        if item then
+            local count = tonumber(item.count) or 0
+            if count > 0 and isCargoItem(item.name) then
+                n = n + count
+            end
         end
     end
     return n
@@ -266,12 +299,148 @@ function furnace.bufferedUnits(st, itemsPerRecipe)
     return math.floor(n / itemsPerRecipe)
 end
 
+local function invHasItems(name)
+    return invItemCount(name) > 0
+end
+
+local function invHasFluid(name)
+    if not name or not peripheral.isPresent(name) then
+        return false
+    end
+    local inv = peripheral.wrap(name)
+    if not inv or type(inv.tanks) ~= "function" then
+        return false
+    end
+    local ok, tanks = pcall(inv.tanks)
+    if not ok or type(tanks) ~= "table" then
+        return false
+    end
+    for _, t in pairs(tanks) do
+        if t then
+            local amt = tonumber(t.amount) or 0
+            local cname = t.name
+            if amt > 0 and isRealItemName(cname) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function invHasContent(name)
+    return invHasItems(name) or invHasFluid(name)
+end
+
 local function outputItemCount(st)
     if not st then
         return 0
     end
     return invItemCount(st.outputBus) + invItemCount(st.outputHatch)
 end
+
+local function hatchPresent(name)
+    return name and peripheral.isPresent(name)
+end
+
+--- Complete hatch set: item+fluid in and out (all present on the network).
+function furnace.isCompletePack(st)
+    return st
+        and hatchPresent(st.inputBus)
+        and hatchPresent(st.inputHatch)
+        and hatchPresent(st.outputBus)
+        and hatchPresent(st.outputHatch)
+end
+
+--- empty | busy | warn_* | err_no_*
+-- Missing hatch → err_no_*; content mismatch → warn_*; else empty/busy.
+function furnace.packHatchStatus(st)
+    if not st then
+        return "empty"
+    end
+
+    -- Structural errors first (why packs count < list length).
+    if not hatchPresent(st.inputBus) then
+        return "err_no_item_in"
+    end
+    if not hatchPresent(st.inputHatch) then
+        return "err_no_fluid_in"
+    end
+    if not hatchPresent(st.outputBus) then
+        return "err_no_item_out"
+    end
+    if not hatchPresent(st.outputHatch) then
+        return "err_no_fluid_out"
+    end
+
+    local hasItems = invHasItems(st.inputBus)
+    local hasFluid = invHasFluid(st.inputHatch)
+    if hasItems and not hasFluid then
+        return "warn_item"
+    end
+    if hasFluid and not hasItems then
+        return "warn_fluid"
+    end
+    if hasItems and hasFluid then
+        return "busy"
+    end
+    if invHasItems(st.outputBus) or invHasContent(st.outputHatch) then
+        return "busy"
+    end
+    return "empty"
+end
+
+--- Hot-sink fill 0..100. GT hot ingots stack to 16 (not 64).
+-- Uses item maxCount when available; default stack 16 for empty slots.
+function furnace.hotFillPercent(hotSink)
+    if not hotSink or not peripheral.isPresent(hotSink) then
+        return nil
+    end
+    local inv = peripheral.wrap(hotSink)
+    if not inv or type(inv.list) ~= "function" then
+        return nil
+    end
+    local size = 0
+    if type(inv.size) == "function" then
+        size = tonumber(inv.size()) or 0
+    end
+    local listed = inv.list() or {}
+    local total = 0
+    local stackMax = 16
+    for slot, it in pairs(listed) do
+        if it then
+            local count = tonumber(it.count) or 0
+            if count > 0 then
+                total = total + count
+                if type(inv.getItemDetail) == "function" then
+                    local ok, detail = pcall(inv.getItemDetail, slot)
+                    if ok and detail then
+                        local m = tonumber(detail.maxCount)
+                            or tonumber(detail.maxStackSize)
+                        if m and m > 0 then
+                            stackMax = m
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if size <= 0 then
+        return total > 0 and 100 or 0
+    end
+    local cap = size * stackMax
+    if cap <= 0 then
+        return 0
+    end
+    local pct = math.floor((100 * total) / cap + 0.5)
+    if pct > 100 then
+        pct = 100
+    end
+    return pct
+end
+
+furnace.invHasContent = invHasContent
+furnace.invHasItems = invHasItems
+furnace.invHasFluid = invHasFluid
 
 --- Cap sticky inflight used for feed limiting (UI uses bufferedUnits separately).
 -- While craft_grace after last feed: do NOT touch sticky (drain alone decrements).

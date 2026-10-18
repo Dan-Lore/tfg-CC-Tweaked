@@ -14,16 +14,25 @@ function net_watch.flushEvents(tag)
 end
 
 --- Sleep seconds; return true if a peripheral attach/detach arrived (wakes early).
+-- Unlike os.sleep / sleep(), does NOT discard peripheral events (pullEvent filter).
 function net_watch.sleepWatch(seconds)
-    local timer = os.startTimer(seconds)
+    local timer = os.startTimer(tonumber(seconds) or 0)
+    local hotplug = false
     while true do
         local ev, p1 = os.pullEvent()
-        if ev == "timer" and p1 == timer then
-            return false
-        elseif ev == "peripheral" or ev == "peripheral_detach" then
-            return true
+        if ev == "peripheral" or ev == "peripheral_detach" then
+            hotplug = true
+            -- Keep waiting for our timer so a burst of attaches still yields once,
+            -- but report hotplug so callers can rescan.
+        elseif ev == "timer" and p1 == timer then
+            return hotplug
         end
     end
+end
+
+--- Zero-tick yield that preserves peripheral events (use instead of sleep(0)).
+function net_watch.yieldWatch()
+    return net_watch.sleepWatch(0)
 end
 
 --- Sleep full duration; call onHotplug() on attach/detach but do not wake early.

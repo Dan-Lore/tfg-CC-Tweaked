@@ -386,6 +386,161 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
+        name = "packHatchStatus empty busy err",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
+            addInv("gtceu:lv_output_bus_0", {})
+            addTankInv("gtceu:lv_output_hatch_0", {}, {})
+            local st = furnace.newState({
+                index = 0,
+                inputBus = "gtceu:lv_input_bus_0",
+                inputHatch = "gtceu:ev_input_hatch_4x_0",
+                outputBus = "gtceu:lv_output_bus_0",
+                outputHatch = "gtceu:lv_output_hatch_0",
+            })
+            A.eq(furnace.packHatchStatus(st), "empty")
+            A.truthy(furnace.isCompletePack(st))
+
+            -- Item without fluid = warn_item.
+            addInv("gtceu:lv_input_bus_0", {
+                [1] = { name = "gtceu:aluminium_dust", count = 1 },
+            })
+            A.eq(furnace.packHatchStatus(st), "warn_item")
+
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {
+                { name = "gtceu:nitrogen", amount = 500 },
+            })
+            A.eq(furnace.packHatchStatus(st), "busy")
+        end,
+    },
+    {
+        name = "packHatchStatus fluid without dust is warn_fluid",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {
+                { name = "gtceu:nitrogen", amount = 10 },
+            })
+            addInv("gtceu:lv_output_bus_0", {})
+            addTankInv("gtceu:lv_output_hatch_0", {}, {})
+            local st = furnace.newState({
+                index = 0,
+                inputBus = "gtceu:lv_input_bus_0",
+                inputHatch = "gtceu:ev_input_hatch_4x_0",
+                outputBus = "gtceu:lv_output_bus_0",
+                outputHatch = "gtceu:lv_output_hatch_0",
+            })
+            A.eq(furnace.packHatchStatus(st), "warn_fluid")
+        end,
+    },
+    {
+        name = "packHatchStatus truly empty is empty",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
+            addInv("gtceu:lv_output_bus_0", {})
+            addTankInv("gtceu:lv_output_hatch_0", {}, {})
+            local st = furnace.newState({
+                index = 0,
+                inputBus = "gtceu:lv_input_bus_0",
+                inputHatch = "gtceu:ev_input_hatch_4x_0",
+                outputBus = "gtceu:lv_output_bus_0",
+                outputHatch = "gtceu:lv_output_hatch_0",
+            })
+            A.eq(furnace.packHatchStatus(st), "empty")
+        end,
+    },
+    {
+        name = "packHatchStatus ignores programmable circuit in bus",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {
+                [5] = { name = "gtceu:programmable_circuit", count = 1 },
+            })
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
+            addInv("gtceu:lv_output_bus_0", {})
+            addTankInv("gtceu:lv_output_hatch_0", {}, {})
+            local st = furnace.newState({
+                index = 0,
+                inputBus = "gtceu:lv_input_bus_0",
+                inputHatch = "gtceu:ev_input_hatch_4x_0",
+                outputBus = "gtceu:lv_output_bus_0",
+                outputHatch = "gtceu:lv_output_hatch_0",
+            })
+            A.eq(furnace.packHatchStatus(st), "empty")
+            A.eq(furnace.bufferedUnits(st, 1), 0)
+        end,
+    },
+    {
+        name = "packHatchStatus missing fluid in hatch is err",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addInv("gtceu:lv_output_bus_0", {})
+            addTankInv("gtceu:lv_output_hatch_0", {}, {})
+            local st = furnace.newState({
+                index = 0,
+                inputBus = "gtceu:lv_input_bus_0",
+                inputHatch = nil,
+                outputBus = "gtceu:lv_output_bus_0",
+                outputHatch = "gtceu:lv_output_hatch_0",
+            })
+            A.eq(furnace.packHatchStatus(st), "err_no_fluid_in")
+            A.falsy(furnace.isCompletePack(st))
+        end,
+    },
+    {
+        name = "packHatchStatus missing item out hatch is err",
+        fn = function()
+            stub.reset()
+            stub.install()
+            addInv("gtceu:lv_input_bus_0", {})
+            addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
+            addTankInv("gtceu:lv_output_hatch_0", {}, {})
+            local st = furnace.newState({
+                index = 0,
+                inputBus = "gtceu:lv_input_bus_0",
+                inputHatch = "gtceu:ev_input_hatch_4x_0",
+                outputBus = nil,
+                outputHatch = "gtceu:lv_output_hatch_0",
+            })
+            A.eq(furnace.packHatchStatus(st), "err_no_item_out")
+        end,
+    },
+    {
+        name = "hotFillPercent uses stack 16 not 64",
+        fn = function()
+            stub.reset()
+            stub.install()
+            local inv = stub.makeInventory({
+                [1] = {
+                    name = "gtceu:hot_aluminium_ingot",
+                    count = 8,
+                    detail = {
+                        name = "gtceu:hot_aluminium_ingot",
+                        count = 8,
+                        maxCount = 16,
+                    },
+                },
+            })
+            -- 1 slot * 16 = 50% (hot ingots, not *64)
+            inv.size = function()
+                return 1
+            end
+            stub.addPeripheral("gtceu:hv_buffer_0", inv)
+            A.eq(furnace.hotFillPercent("gtceu:hv_buffer_0"), 50)
+            A.isNil(furnace.hotFillPercent("missing"))
+        end,
+    },
+    {
         name = "pushRecipeUnits batches single-item stack",
         fn = function()
             stub.reset()

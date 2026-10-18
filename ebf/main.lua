@@ -34,13 +34,21 @@ local lastStatus = ""
 local lastStatusAt = 0
 local lastUiAt = 0
 local booted = false
-local queueLabel = "-"
+local runMode = "SCAN"
 local quietFed = 0
 local quietDone = 0
 local packRr = 1
 -- Sticky AE buffer: 100 identical crafts refill the same buffer one-by-one.
 local activeBuf = nil
 local drainSweep = 0
+local lastScanAt = 0
+local SCAN_EVERY = 30
+
+local function yieldNet()
+    if net_watch.yieldWatch() then
+        dirty = true
+    end
+end
 
 local function setStatus(msg, forcePrint)
     msg = msg or ""
@@ -55,6 +63,10 @@ local function setStatus(msg, forcePrint)
     end
 end
 
+local function setMode(mode)
+    runMode = mode or "IDLE"
+end
+
 local function flushQuiet()
     if quietFed <= 0 and quietDone <= 0 then
         return
@@ -65,15 +77,6 @@ local function flushQuiet()
     lastStatus = msg
     lastStatusAt = os.clock()
     print("ebf: " .. msg)
-end
-
-local function totals()
-    local fed, drained = 0, 0
-    for _, st in pairs(states) do
-        fed = fed + (st.fed or 0)
-        drained = drained + (st.drained or 0)
-    end
-    return fed, drained
 end
 
 local function anyInflight()
@@ -91,29 +94,41 @@ local function refreshUi(force)
         return
     end
     lastUiAt = now
-    local itemsPer = tonumber(config.items_per_recipe) or 1
-    local view = {}
+
+    local complete = 0
+    local rows = {}
     for i = 1, #packList do
         local st = packList[i]
-        view[i] = {
+        if furnace.isCompletePack(st) then
+            complete = complete + 1
+        end
+        rows[i] = {
             index = st.pair or ((st.index or 0) + 1),
-            inflight = furnace.bufferedUnits(st, itemsPer),
-            lastRecipe = st.lastRecipe,
+            status = furnace.packHatchStatus(st),
         }
     end
-    local fed, drained = totals()
+
     ui.draw(net.monitor, {
-        furnaces = view,
-        bufferCount = #(net.buffers or {}),
-        maxInflight = config.max_inflight,
-        status = lastStatus,
-        queueLabel = queueLabel,
-        fedTotal = fed,
-        drainedTotal = drained,
+        mode = runMode,
+        packs = complete,
+        suppliers = #(net.buffers or {}),
+        hotPct = furnace.hotFillPercent(net.hotSink),
+        rows = rows,
     })
 end
 
+local function anyPackWarn()
+    for i = 1, #packList do
+        local s = furnace.packHatchStatus(packList[i])
+        if s and (s:find("^warn_", 1) or s:find("^err", 1)) then
+            return true
+        end
+    end
+    return false
+end
+
 local function rescan(reason, showBoot)
+    setMode("SCAN")
     net = discover.scan(config)
     states = furnace.mergeStates(states, net.furnaces or {})
     packList = furnace.listByIndex(states)
@@ -121,29 +136,42 @@ local function rescan(reason, showBoot)
     packRr = 1
     activeBuf = nil
     drainSweep = 0
+    lastScanAt = furnace._nowSeconds()
     if reason then
         print("ebf: rescan (" .. tostring(reason) .. ")")
     end
     discover.printSummary(net)
     if #packList == 0 then
         setStatus("no hatch packs", true)
+        setMode("ERR")
     elseif #(net.buffers or {}) == 0 then
         setStatus("no recipe buffers", true)
+        setMode("ERR")
     elseif not net.hotSink then
         setStatus("missing hot_sink", true)
+        setMode("ERR")
     elseif not net.aeSink then
         setStatus("missing ae_sink", true)
+        setMode("ERR")
     end
     if showBoot or not booted then
-        ui.boot(net.monitor, "scanning...")
+        ui.boot(net.monitor, "scan")
         booted = true
     end
     refreshUi(true)
 end
 
 local function ensureNet()
+    local now = furnace._nowSeconds()
+    if (now - (lastScanAt or 0)) >= SCAN_EVERY then
+        dirty = true
+    end
     if dirty or #packList == 0 then
-        rescan(dirty and "hotplug" or "init", not booted)
+        local reason = "init"
+        if dirty then
+            reason = ((now - (lastScanAt or 0)) >= SCAN_EVERY) and "periodic" or "hotplug"
+        end
+        rescan(reason, not booted)
     end
     return #packList > 0
 end
@@ -175,7 +203,7 @@ local function resolveActiveBuffer(buffers, waitRefills)
         end
         if known and waitRefills then
             for _ = 1, 2 do
-                sleep(0)
+                yieldNet()
                 if recipe.isNonEmpty(activeBuf) then
                     return activeBuf
                 end
@@ -256,7 +284,6 @@ local function feedPass()
             st.lastError = nil
             fed = fed + units
             quietFed = quietFed + units
-            queueLabel = st.lastRecipe or queueLabel
             -- Same buffer often refills next; short wait only, no full rescan spam.
             if not recipe.isNonEmpty(buf) then
                 local again = resolveActiveBuffer(buffers, true)
@@ -282,9 +309,6 @@ local function feedPass()
         end
     end
 
-    if fed == 0 and not activeBuf then
-        queueLabel = "-"
-    end
     return fed
 end
 
@@ -310,7 +334,10 @@ local function tick()
         if fed == 0 and done == 0 then
             break
         end
-        sleep(0)
+        yieldNet()
+        if dirty then
+            break
+        end
     end
 
     if quietFed > 0 or quietDone > 0 then
@@ -319,13 +346,23 @@ local function tick()
         else
             lastStatus = ("fed +%d  done +%d"):format(quietFed, quietDone)
         end
-    elseif not worked then
+    end
+
+    if worked then
+        setMode("WORK")
+    elseif anyPackWarn() then
+        setMode("WARN")
+        setStatus("hatch mismatch (item/fluid)")
+    else
         local st = furnace.pickTarget(states, config.max_inflight, packList, packRr)
         if not st then
+            setMode("FULL")
             setStatus("full — waiting on outputs")
         elseif activeBuf then
-            setStatus("waiting AE refill " .. tostring(activeBuf))
+            setMode("WAIT")
+            setStatus("waiting AE refill")
         else
+            setMode("IDLE")
             setStatus("idle — waiting for recipes")
         end
     end
@@ -354,3 +391,4 @@ while true do
         dirty = true
     end
 end
+

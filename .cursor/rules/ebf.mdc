@@ -30,7 +30,8 @@ CC: Tweaked script for TerraFirmaGreg. Feeds atomic recipes from HV buffers into
 - Stick to the non-empty AE buffer; brief wait for same-buffer refill before scanning others
 - One hatch = L+R: finish incomplete pairs (inflight 1→2) before opening empty packs, then buffer
 - One recipe push when fluids present (dust+N2)
-- Monitor X/N = items in input bus; sticky only limits feeding
+- Sticky only limits feeding (not shown on monitor)
+- Monitor: mode, complete packs, suppliers, hot%, per-pack empty/busy/ERR
 - Drain packs with `inflight>0`; rare full sweep for missed outputs
 - During `craft_grace` (default 90s) after feed: never reconcile-clear sticky (drain only)
 - Sequential modem I/O; idle ≥0.05s

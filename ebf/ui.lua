@@ -39,11 +39,37 @@ function ui.boot(mon, msg)
     end
     mon.clear()
     local w = select(1, mon.getSize())
-    writeAt(mon, 1, 1, "EBF FEED", loadColor("cyan", 1), w)
-    writeAt(mon, 1, 3, msg or "boot...", loadColor("yellow", 1), w)
+    writeAt(mon, 1, 1, "EBF", loadColor("cyan", 1), w)
+    writeAt(mon, 1, 2, "SCAN", loadColor("yellow", 1), w)
+    writeAt(mon, 1, 4, msg or "boot", loadColor("gray", 1), w)
 end
 
---- state: furnaces (sorted), buffers, status, fedTotal, drainedTotal, queueLabel
+local STATUS_LABEL = {
+    empty = "-",
+    busy = "busy",
+    warn_item = "WARN item",
+    warn_fluid = "WARN fluid",
+    err_no_fluid_in = "ERR no fluid in",
+    err_no_item_out = "ERR no item out",
+    err_no_fluid_out = "ERR no fluid out",
+    err_no_item_in = "ERR no item in",
+    err = "ERR",
+}
+
+local STATUS_COLOR = {
+    empty = "gray",
+    busy = "lime",
+    warn_item = "orange",
+    warn_fluid = "orange",
+    err_no_fluid_in = "red",
+    err_no_item_out = "red",
+    err_no_fluid_out = "red",
+    err_no_item_in = "red",
+    err = "red",
+}
+
+--- Compact status board (no recipes / inflight fractions).
+-- state: mode, packs, suppliers, hotPct, rows[{index,status}]
 function ui.draw(mon, state)
     if not mon then
         return
@@ -65,79 +91,76 @@ function ui.draw(mon, state)
     local lime = loadColor("lime", 1)
     local yellow = loadColor("yellow", 1)
     local gray = loadColor("gray", 1)
+    local red = loadColor("red", 1)
+    local cyan = loadColor("cyan", 1)
     local orange = loadColor("orange", 1)
-    local lightBlue = loadColor("lightBlue", 1)
 
-    local furnaces = state.furnaces or {}
-    local bufN = tonumber(state.bufferCount) or 0
-    local maxInf = tonumber(state.maxInflight) or 6
-
-    writeAt(mon, 1, 1, clip("EBF  q:" .. tostring(bufN), w), lightBlue, w)
-
-    local idle = 0
-    local room = 0
-    for i = 1, #furnaces do
-        local inf = furnaces[i].inflight or 0
-        if inf == 0 then
-            idle = idle + 1
-        end
-        if inf < maxInf then
-            room = room + 1
-        end
+    local mode = tostring(state.mode or "IDLE"):upper()
+    local modeColor = white
+    if mode == "WORK" then
+        modeColor = lime
+    elseif mode == "WAIT" or mode == "FULL" or mode == "WARN" then
+        modeColor = yellow
+    elseif mode == "SCAN" then
+        modeColor = cyan
+    elseif mode == "ERR" then
+        modeColor = red
     end
-    -- Each hatch pack feeds 2 paired EBFs.
+
+    writeAt(mon, 1, 1, clip("EBF " .. mode, w), modeColor, w)
     writeAt(
         mon,
         1,
         2,
-        clip(string.format("p:%d idle:%d", #furnaces, idle), w),
+        clip(("packs %d"):format(tonumber(state.packs) or 0), w),
+        white,
+        w
+    )
+    writeAt(
+        mon,
+        1,
+        3,
+        clip(("supp  %d"):format(tonumber(state.suppliers) or 0), w),
         white,
         w
     )
 
-    local y = 3
-    local status = state.status or ""
-    if status ~= "" then
-        writeAt(mon, 1, y, clip(status, w), yellow, w)
-        y = y + 1
-    end
-
-    local recipe = state.queueLabel
-    if recipe and recipe ~= "" and recipe ~= "-" then
-        writeAt(mon, 1, y, clip(">" .. recipe, w), lime, w)
-        y = y + 1
-    end
-
-    writeAt(
-        mon,
-        1,
-        y,
-        clip(string.format("in:%d out:%d", state.fedTotal or 0, state.drainedTotal or 0), w),
-        gray,
-        w
-    )
-    y = y + 1
-
-    -- Per-furnace lines: "#0 2/3 steel"
-    local rowsLeft = h - y + 1
-    local show = math.min(#furnaces, math.max(0, rowsLeft))
-    for i = 1, show do
-        local st = furnaces[i]
-        local inf = st.inflight or 0
-        local color = gray
-        if inf >= maxInf then
-            color = orange
-        elseif inf > 0 then
-            color = lime
+    local hot = state.hotPct
+    if hot == nil then
+        writeAt(mon, 1, 4, clip("hot   ?", w), gray, w)
+    else
+        local hotColor = lime
+        if hot >= 90 then
+            hotColor = red
+        elseif hot >= 70 then
+            hotColor = orange
+        elseif hot >= 40 then
+            hotColor = yellow
         end
-        local label = st.lastRecipe or "-"
-        -- index is pair id (1,2,3…) = NL+NR sharing one hatch set
-        local line = string.format("%d %d/%d %s", st.index or i, inf, maxInf, label)
-        writeAt(mon, 1, y, clip(line, w), color, w)
+        writeAt(mon, 1, 4, clip(("hot   %d%%"):format(hot), w), hotColor, w)
+    end
+
+    local rows = state.rows or {}
+    local y = 5
+    local show = math.min(#rows, math.max(0, h - y + 1))
+    for i = 1, show do
+        local row = rows[i]
+        local stName = row.status or "empty"
+        local label = STATUS_LABEL[stName] or stName
+        local cname = STATUS_COLOR[stName] or "gray"
+        local color = loadColor(cname, gray)
+        writeAt(
+            mon,
+            1,
+            y,
+            clip(("%d %s"):format(row.index or i, label), w),
+            color,
+            w
+        )
         y = y + 1
     end
-    if #furnaces > show and y <= h then
-        writeAt(mon, 1, y, clip(("+ %d more"):format(#furnaces - show), w), yellow, w)
+    if #rows > show and y <= h then
+        writeAt(mon, 1, y, clip(("+ %d"):format(#rows - show), w), yellow, w)
     end
 end
 
