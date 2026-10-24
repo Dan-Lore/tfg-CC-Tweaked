@@ -1,0 +1,36 @@
+---
+description: Interplanetary railgun — wait for full loaders, settle, pulse relay
+globs: railgun/**
+---
+
+# railgun
+
+Dedicated CC computer: watch one Interplanetary Railgun **Sender**’s HV input loaders; when they are slot-full, wait a settle window, then pulse `redstone_relay` so the Sender **Redstone Rule** launches. Fill / ammo / EU / routing stay manual.
+
+## Layout
+
+- One computer, wired modem network
+- Same Sender: 10× `tfg:hv_railgun_item_loader_in_*` (`expected | 10`)
+- `redstone_relay` on **top** of the computer; pulse **`back`** (same facing as the computer) — relay back face sits against the railgun / its redstone input
+- Railgun controller itself is **not** on the computer (no status API yet)
+
+## Behaviour
+
+1. **Full** = no empty **cargo** slots (partial stacks OK). Ignores GT programmed-circuit slot (one empty allowed if circuit isn’t an item in `list()`).
+2. Require **all** discovered loaders full and count ≥ `expected` (wait if fewer).
+3. **Settle** (`settle | 15`): after first all-full, keep watching; if any slot frees, restart settle. Only then pulse.
+4. **Pulse** (`pulse`, several seconds) on `relay_side` (`back`), then **cooldown** (`cooldown | 120`).
+5. Hotplug rescan via `shared/net_watch`.
+
+## Non-goals / TODO
+
+- Does not fill loaders, make ammo, supply EU, or pick destinations
+- TODO: detect failed launch (no ammo / no EU / bus off) when the railgun is exposable to CC
+
+## Deploy
+
+```text
+python tools/bundle_project.py railgun
+```
+
+Copy **both** `dist/railgun.lua` and `railgun.cfg` onto the computer.
