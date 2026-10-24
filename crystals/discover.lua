@@ -328,7 +328,28 @@ function discover.overflow(cfg, machineSet, primary)
             out[#out + 1] = resolved
         end
     end
-    return out
+
+    local needles = cfg.OVERFLOW_SUBSTR
+    if needles and (type(needles) == "string" or (type(needles) == "table" and #needles > 0)) then
+        local periNames = peripheral.getNames()
+        for i = 1, #periNames do
+            local name = periNames[i]
+            if not seen[name] and not machineSet[name] and not isLocalSide(name) then
+                local types = peripheralTypes(name)
+                if not shouldSkip(name, types) and isInventory(name)
+                    and matchesAny(name, types, needles)
+                then
+                    seen[name] = true
+                    out[#out + 1] = name
+                end
+            end
+            if i % 8 == 0 then
+                sleep(0)
+            end
+        end
+    end
+
+    return sortMachines(out)
 end
 
 function discover.scan(cfg)

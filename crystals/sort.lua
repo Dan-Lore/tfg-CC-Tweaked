@@ -402,18 +402,21 @@ function sort.spillTo(fromName, overflowNames, opts)
             break
         end
 
-        local dest = nil
+        local got = 0
+        local anyPresent = false
         for i = 1, #overflowNames do
-            if overflowNames[i] ~= fromName and peripheral.isPresent(overflowNames[i]) then
-                dest = overflowNames[i]
-                break
+            local dest = overflowNames[i]
+            if dest and dest ~= fromName and peripheral.isPresent(dest) then
+                anyPresent = true
+                got = push(inv, dest, pick, even)
+                if got > 0 then
+                    break
+                end
             end
         end
-        if not dest then
+        if not anyPresent then
             return movedTotal, "overflow missing"
         end
-
-        local got = push(inv, dest, pick, even)
         if got <= 0 then
             return movedTotal, "overflow full"
         end

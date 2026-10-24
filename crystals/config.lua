@@ -11,6 +11,7 @@ local function empty()
         MONITOR = "left",
         BUFFER = "top",
         OVERFLOW = nil, -- extra crates when the main buffer fills
+        OVERFLOW_SUBSTR = nil, -- auto-find overflow crates by name/type needle
         MACHINES = nil,
         MACHINE_SUBSTR = nil, -- filled via appendList or default in finalize
         MAX_STACK = 64,
@@ -71,6 +72,14 @@ local function parseLine(cfg, line, lineNo, label)
             error(("%s line %s: overflow | peripheral"):format(label, tostring(lineNo)))
         end
         appendList(cfg, "OVERFLOW", parts[2])
+        return
+    end
+
+    if key == "overflow_substr" then
+        if #parts < 2 then
+            error(("%s line %s: overflow_substr | needle"):format(label, tostring(lineNo)))
+        end
+        appendList(cfg, "OVERFLOW_SUBSTR", parts[2])
         return
     end
 
