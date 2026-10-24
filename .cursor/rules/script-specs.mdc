@@ -1,0 +1,18 @@
+---
+description: Specs for every CC script — ask first, format after, flag logic conflicts
+alwaysApply: true
+---
+
+# Script specs
+
+Every project/script gets a written spec (prefer `.cursor/rules/<project>.mdc`, same style as `ae2_feed`, `ebf`, `crystals`, `railgun`).
+
+## Workflow (mandatory)
+
+1. **Ask the user** how the in-world system works before writing or rewriting a spec: layout (computers, peripherals, sides), trigger conditions, what “full/empty/done” means, redstone/AE/pipes, failure modes, expected counts.
+2. **Do not format** the spec (no polished `.mdc` / structured sections) until after that Q&A. Rough notes or clarifying questions first is fine; the rule file comes only once behaviour is confirmed.
+3. **Report contradictions** explicitly: if the user’s answers conflict with each other, with existing code/cfg, or with pack behaviour already documented in project rules — stop and call out the conflict; do not silently pick a side or invent a compromise.
+
+## Spec content (after confirmation)
+
+Keep short: layout, behaviour, deploy (`bundle_project.py` + cfg), non-goals. Update the matching rule when behaviour changes.
