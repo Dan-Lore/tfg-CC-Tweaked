@@ -114,6 +114,41 @@ function methods:latest(item)
     return pts[#pts]
 end
 
+--- Merge server points by timestamp (no full wipe — avoids flicker between sources).
+function methods:merge(item, pts)
+    if not item or type(pts) ~= "table" then
+        return
+    end
+    local existing = self.series[item] or {}
+    local byT = {}
+    for i = 1, #existing do
+        local p = existing[i]
+        if p and p.t ~= nil then
+            byT[p.t] = p.amount
+        end
+    end
+    for i = 1, #pts do
+        local p = pts[i]
+        if p and p.t ~= nil and p.amount ~= nil then
+            byT[p.t] = p.amount
+        end
+    end
+    local keys = {}
+    for t in pairs(byT) do
+        keys[#keys + 1] = t
+    end
+    table.sort(keys)
+    local out = {}
+    for i = 1, #keys do
+        out[#out + 1] = { t = keys[i], amount = byT[keys[i]] }
+    end
+    self.series[item] = out
+    self.touched[item] = now()
+    self.dirty = true
+    prune(self, item)
+    pruneSeriesKeys(self)
+end
+
 function methods:items()
     local keys = {}
     for k in pairs(self.series) do

@@ -273,18 +273,25 @@ local function handleMessage(sender, msg, bridge)
     elseif msg.kind == "history_req" then
         local item = msg.item
         local since = msg.since
-        -- always refresh with live AE amount so graph matches the list
+        -- refresh with live AE amount (skip 0-spikes after a real reading)
         local live = bridge and getAmount(bridge, item) or nil
+        local latest = hist:latest(item)
         if live ~= nil then
-            hist:add(item, live)
+            local prev = latest and latest.amount
+            if not (live == 0 and prev and prev > 100) then
+                hist:add(item, live)
+                latest = hist:latest(item)
+            end
         end
         local pts = hist:get(item, since)
-        local latest = hist:latest(item)
         protocol.send(sender, {
             kind = "history_res",
             item = item,
             points = pts,
-            amount = live or (latest and latest.amount) or 0,
+            amount = (live and live > 0 and live)
+                or (latest and latest.amount)
+                or live
+                or 0,
             pointCount = #pts,
         })
     end

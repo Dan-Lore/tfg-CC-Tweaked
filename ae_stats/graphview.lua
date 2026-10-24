@@ -84,7 +84,8 @@ local textScale, W, H = applyScale()
 local localHist = history.new({ retain = 2.5 * 3600 })
 
 local state = {
-    sampler = cfg.host_id,
+    sampler = cfg.host_id, -- pinned once set; do not hop between samplers
+    samplerPinned = cfg.host_id ~= nil,
     status = "Waiting for focus...",
     selected = nil,
     amount = 0,
@@ -92,6 +93,8 @@ local state = {
     window = cfg.window,
     step = cfg.step,
     interp = cfg.interp,
+    viewMin = nil, -- smoothed Y axis
+    viewMax = nil,
 }
 
 local buttons = {}
@@ -165,8 +168,22 @@ local function resolveSampler()
     local id = rednet.lookup(protocol.NAME, protocol.HOST)
     if id then
         state.sampler = id
+        state.samplerPinned = true
+        print("Pinned sampler #" .. tostring(id))
     end
     return state.sampler
+end
+
+local function noteSampler(id)
+    if not id then
+        return
+    end
+    if not state.sampler then
+        state.sampler = id
+        state.samplerPinned = true
+        print("Pinned sampler #" .. tostring(id))
+    end
+    -- once pinned, ignore other sampler hellos (prevents dual-history flicker)
 end
 
 local function ensureStepValid()
@@ -205,9 +222,8 @@ local function req(msg, wantKind, timeout)
                 if a == host and m.kind == wantKind then
                     return m
                 elseif m.kind == "hello" and m.role == "sampler" then
-                    state.sampler = a
+                    noteSampler(a)
                 elseif m.kind == "focus_set" then
-                    -- apply later via pending; stash on state
                     state._pendingFocus = m
                 end
             end
@@ -250,26 +266,23 @@ local function requestHistory()
     if res then
         local pts = res.points or {}
         if #pts > 0 then
-            localHist.series[state.selected] = {}
-            for i = 1, #pts do
-                local p = pts[i]
-                if p and p.t ~= nil and p.amount ~= nil then
-                    localHist:add(state.selected, p.amount, p.t)
-                end
-            end
+            localHist:merge(state.selected, pts)
         end
         if res.amount ~= nil then
             state.amount = res.amount
-            -- always pin live tip so Y-scale includes "now"
             localHist:add(state.selected, res.amount)
         end
-        state.status = string.format("%d pts", #pts)
+        local n = #(localHist:get(state.selected) or {})
+        state.status = string.format("%d pts", n)
     end
 end
 
 local function applyFocus(msg)
     if not msg or not msg.item then
         return
+    end
+    if state.selected ~= msg.item then
+        state.viewMin, state.viewMax = nil, nil
     end
     state.selected = msg.item
     if msg.window then
@@ -286,6 +299,29 @@ local function applyFocus(msg)
     end
     ensureStepValid()
     requestHistory()
+end
+
+local AXIS_SMOOTH = 0.35 -- EMA toward new ymin/ymax (less flicker)
+local function smoothAxis(ymin, ymax)
+    if not state.viewMin then
+        state.viewMin, state.viewMax = ymin, ymax
+        return ymin, ymax
+    end
+    state.viewMin = state.viewMin * (1 - AXIS_SMOOTH) + ymin * AXIS_SMOOTH
+    state.viewMax = state.viewMax * (1 - AXIS_SMOOTH) + ymax * AXIS_SMOOTH
+    -- expand immediately if live tip is outside (never clip "now")
+    if state.amount ~= nil then
+        if state.amount < state.viewMin then
+            state.viewMin = state.amount
+        end
+        if state.amount > state.viewMax then
+            state.viewMax = state.amount
+        end
+    end
+    if state.viewMax <= state.viewMin then
+        state.viewMax = state.viewMin + 1
+    end
+    return state.viewMin, state.viewMax
 end
 
 local function drawButtons()
@@ -354,19 +390,18 @@ local function draw()
     local gutter = math.min(12, math.max(8, math.floor(chartW * 0.18)))
     local plotW = math.max(4, chartW - gutter)
     local ys, ymin, ymax = graph.resample(buckets, plotW, state.interp)
-    -- never clip "now" above/below the axis
+    -- resample already pads; include live tip then smooth axis across frames
     if state.amount ~= nil then
         ymin = math.min(ymin, state.amount)
         ymax = math.max(ymax, state.amount)
-        if ymax <= ymin then
-            ymax = ymin + 1
-        end
-        local pad = (ymax - ymin) * 0.05
-        ymin, ymax = ymin - pad, ymax + pad
         if #ys > 0 then
             ys[#ys] = state.amount
         end
     end
+    if ymax <= ymin then
+        ymax = ymin + 1
+    end
+    ymin, ymax = smoothAxis(ymin, ymax)
     graph.draw(mon, 1, chartY, chartW, chartH, ys, ymin, ymax, state.interp, isFluid)
 
     local by = H - 2
@@ -443,7 +478,7 @@ local function main()
                 drainPendingTouches()
                 draw()
             elseif msg and msg.kind == "hello" and msg.role == "sampler" then
-                state.sampler = a
+                noteSampler(a)
             end
         elseif ev == "key" and a == keys.q then
             break
