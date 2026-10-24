@@ -75,6 +75,38 @@ local function lifeColor(pct)
     return colors.lime
 end
 
+--- Truncate by display columns without splitting a UTF-8 codepoint (byte :sub
+-- mid-character shows as mojibake on CC monitors).
+local function truncateCols(text, maxCols)
+    text = tostring(text or "")
+    maxCols = tonumber(maxCols) or 0
+    if maxCols <= 0 then
+        return ""
+    end
+    if utf8 and utf8.len and utf8.offset then
+        local n = utf8.len(text)
+        if not n then
+            -- invalid UTF-8; fall back to bytes
+            if #text > maxCols then
+                return text:sub(1, maxCols)
+            end
+            return text
+        end
+        if n <= maxCols then
+            return text
+        end
+        local cut = utf8.offset(text, maxCols + 1)
+        if cut then
+            return text:sub(1, cut - 1)
+        end
+        return text
+    end
+    if #text > maxCols then
+        return text:sub(1, maxCols)
+    end
+    return text
+end
+
 local function writeLine(mon, y, text, color)
     local w = mon.getSize()
     mon.setCursorPos(1, y)
@@ -83,12 +115,8 @@ local function writeLine(mon, y, text, color)
     else
         mon.setTextColor(colors.white)
     end
-    text = tostring(text or "")
-    if #text > w then
-        text = text:sub(1, w)
-    end
     mon.clearLine()
-    mon.write(text)
+    mon.write(truncateCols(text, w))
 end
 
 function ui.find(cfg)
@@ -249,10 +277,10 @@ function ui.draw(mon, cfg, states, globalErr)
             end
 
             if s.alert == "hard" then
-                writeLine(mon, y, "  Тревога: не хватает стержней, проверь AE", colors.red)
+                writeLine(mon, y, "  Тревога: мало стержней, проверь AE", colors.red)
                 y = y + 1
             elseif s.alert == "soft" then
-                writeLine(mon, y, "  Предупреждение: мало на след. цикл, проверь AE", colors.orange)
+                writeLine(mon, y, "  Предупреждение: мало стержней в запасе, проверь AE", colors.orange)
                 y = y + 1
             end
         end
