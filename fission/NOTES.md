@@ -45,6 +45,45 @@ Observed: 2× thorium → `heating=280` = 2×0.7×200; `heatPost≈277` ≈ 280/
 
 Uranium needs `temperatureMax ≥ ss_1` (~436) before the script will insert 1 rod.
 
+### Pellet cooling draft (user, 2026-10-24 / corrected)
+
+- Stock Pu rods: `gtceu:wood_crate_4`
+- R1 coolant bus: `gtceu:mv_input_bus_1` — `tfg:terrafirmaguard_pa6`
+- AE interface orders pellets ×64
+- **Cooling:** −40 HU/t **per 100 reactor heat** per active pellet  
+  → `pelletCool = 40 × (heat/100) × P = 0.4 × P × heat` (still ~30 s each, pending confirm)
+
+Steady (full fluid coolant + P pellets), 1× Pu heating = 600 HU/t:
+
+`600 = heat × (1.01 + 0.4·P)` → `heat = 600 / (1.01 + 0.4·P)`
+
+**1× plutonium @ temperatureMax 440:**
+
+| P | ~ss heat | vs 440 |
+|---|---|---|
+| 0 | ~594 | over |
+| 1 | ~426 | OK |
+| 2 | ~331 | OK |
+
+→ **1 гранула одновременно** достаточно (ss ~426 ≤ 440).
+
+### Empirical Pu cycle (user test, 2026-10-25)
+
+- 19× glacian wool casings → `temperatureMax` **438**
+- 1× material holder; recipe `plutonium_coolant`
+- Observed: heat **426/438**, heating 600, fuelDamage **0.85**, cooling ~430, processing **-170**
+- **One full work cycle burned 253 pellets** → cfg uses **256** with margin
+
+### R2 layout
+
+- `fission_reactor_2` + `hv_input_bus_2` / `hv_output_bus_2` + stock `wood_crate_4`
+- Pellet bus: `gtceu:mv_input_bus_2` (cfg; confirm in-world name)
+- Default **manual**; Th/U **auto**. Dump `fission_state.txt` overrides modes.
+
+### Fuel lifetime (default ReactorCurve)
+
+`getFuelWear = Heat/500` per cell/tick. JEI 1250s for Pu assumes heat≈600; real ss≈426 burns slower.
+
 ## CC peripheral
 
 - Name: `fission_reactor_N` (e.g. `fission_reactor_0`)

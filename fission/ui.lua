@@ -1,4 +1,4 @@
--- Russian status monitor for both reactors.
+-- Russian status monitor + touch buttons (mode / one-cycle).
 
 local ui = {}
 
@@ -19,8 +19,7 @@ local function shortName(id)
         return "?"
     end
     local s = tostring(id)
-    local leaf = s:match("([^:/]+)$") or s
-    return leaf
+    return s:match("([^:/]+)$") or s
 end
 
 local function fmtNum(n, digits)
@@ -75,8 +74,6 @@ local function lifeColor(pct)
     return colors.lime
 end
 
---- Truncate by display columns without splitting a UTF-8 codepoint (byte :sub
--- mid-character shows as mojibake on CC monitors).
 local function truncateCols(text, maxCols)
     text = tostring(text or "")
     maxCols = tonumber(maxCols) or 0
@@ -86,7 +83,6 @@ local function truncateCols(text, maxCols)
     if utf8 and utf8.len and utf8.offset then
         local n = utf8.len(text)
         if not n then
-            -- invalid UTF-8; fall back to bytes
             if #text > maxCols then
                 return text:sub(1, maxCols)
             end
@@ -107,6 +103,16 @@ local function truncateCols(text, maxCols)
     return text
 end
 
+local function writeAt(mon, x, y, text, color)
+    mon.setCursorPos(x, y)
+    if color then
+        mon.setTextColor(color)
+    else
+        mon.setTextColor(colors.white)
+    end
+    mon.write(tostring(text or ""))
+end
+
 local function writeLine(mon, y, text, color)
     local w = mon.getSize()
     mon.setCursorPos(1, y)
@@ -119,14 +125,30 @@ local function writeLine(mon, y, text, color)
     mon.write(truncateCols(text, w))
 end
 
+local function paintButton(mon, btn, fg, bg)
+    local mw = mon.getSize()
+    if btn.x1 > mw then
+        return
+    end
+    local width = btn.x2 - btn.x1 + 1
+    mon.setBackgroundColor(bg or colors.gray)
+    mon.setTextColor(fg or colors.white)
+    mon.setCursorPos(btn.x1, btn.y)
+    mon.write(string.rep(" ", width))
+    mon.setCursorPos(btn.x1, btn.y)
+    mon.write(truncateCols(tostring(btn.label or ""), width))
+    mon.setBackgroundColor(colors.black)
+end
+
 function ui.find(cfg)
     return discoverMonitor(cfg and cfg.monitor)
 end
 
---- states: array of { label, ok, running, heat, maxHeat, rods, target, primary, stock, needed, alert, err }
+--- Draw UI; return hitboxes { {x1,x2,y, action, index}, ... }
 function ui.draw(mon, cfg, states, globalErr)
+    local hits = {}
     if not mon then
-        return
+        return hits
     end
     local scale = tonumber(cfg and cfg.text_scale) or 0.5
     if scale < 0.5 then
@@ -137,6 +159,7 @@ function ui.draw(mon, cfg, states, globalErr)
     mon.setTextScale(scale)
     local w, h = mon.getSize()
     mon.setBackgroundColor(colors.black)
+    mon.setTextColor(colors.white)
     mon.clear()
 
     local y = 1
@@ -157,6 +180,53 @@ function ui.draw(mon, cfg, states, globalErr)
         local s = states[i]
         local title = string.format("R%d %s", i - 1, s.label or "")
         writeLine(mon, y, title, colors.lightBlue)
+
+        -- Buttons on the right of the title row.
+        local btnY = y
+        local cycleW, modeW = 6, 5
+        local gap = 1
+        local cycleX2 = w
+        local cycleX1 = cycleX2 - cycleW + 1
+        local modeX2 = cycleX1 - gap - 1
+        local modeX1 = modeX2 - modeW + 1
+        if modeX1 > #title + 2 then
+            local isManual = s.control == "manual"
+            local modeBtn = {
+                x1 = modeX1,
+                x2 = modeX2,
+                y = btnY,
+                label = isManual and "Ручн" or "Авто",
+                action = "toggle_mode",
+                index = i,
+            }
+            paintButton(
+                mon,
+                modeBtn,
+                colors.white,
+                isManual and colors.orange or colors.green
+            )
+            hits[#hits + 1] = modeBtn
+
+            if isManual then
+                local armed = s.cycle == true
+                local cycleBtn = {
+                    x1 = cycleX1,
+                    x2 = cycleX2,
+                    y = btnY,
+                    label = armed and "Цикл*" or "Цикл",
+                    action = "one_cycle",
+                    index = i,
+                }
+                paintButton(
+                    mon,
+                    cycleBtn,
+                    colors.black,
+                    armed and colors.lime or colors.lightBlue
+                )
+                hits[#hits + 1] = cycleBtn
+            end
+        end
+
         y = y + 1
         if y > h then
             break
@@ -166,7 +236,7 @@ function ui.draw(mon, cfg, states, globalErr)
             writeLine(mon, y, "  Ошибка: " .. tostring(s.err), colors.red)
             y = y + 1
         else
-            local runText = s.status or (s.running and "Работает" or "Простой")
+            local runText = s.status or "Простой"
             local runColor = colors.orange
             local sc = s.statusColor
             if sc == "lime" then
@@ -175,10 +245,12 @@ function ui.draw(mon, cfg, states, globalErr)
                 runColor = colors.red
             elseif sc == "yellow" then
                 runColor = colors.yellow
-            elseif sc == "orange" then
-                runColor = colors.orange
             end
-            writeLine(mon, y, "  " .. runText, runColor)
+            local ctrlNote = (s.control == "manual") and " [ручн]" or " [авто]"
+            if s.cycle then
+                ctrlNote = ctrlNote .. " цикл"
+            end
+            writeLine(mon, y, "  " .. runText .. ctrlNote, runColor)
             y = y + 1
             if y > h then
                 break
@@ -241,13 +313,22 @@ function ui.draw(mon, cfg, states, globalErr)
                 break
             end
 
-            writeLine(mon, y, string.format(
-                "  Запас: %d",
-                tonumber(s.stock) or 0
-            ), colors.white)
+            writeLine(mon, y, string.format("  Запас: %d", tonumber(s.stock) or 0), colors.white)
             y = y + 1
             if y > h then
                 break
+            end
+
+            if s.pellets_need and s.pellets_need > 0 then
+                writeLine(mon, y, string.format(
+                    "  Гранулы: %d / нужно %d",
+                    tonumber(s.pellets) or 0,
+                    tonumber(s.pellets_need) or 0
+                ), ((tonumber(s.pellets) or 0) >= (tonumber(s.pellets_need) or 0)) and colors.lime or colors.orange)
+                y = y + 1
+                if y > h then
+                    break
+                end
             end
 
             local lifePct = tonumber(s.lifePct) or 0
@@ -269,8 +350,11 @@ function ui.draw(mon, cfg, states, globalErr)
             end
 
             local barInner = math.max(8, w - 8)
-            local bar = progressBar(barInner, lifePct)
-            writeLine(mon, y, string.format("  %s %d%%", bar, math.floor(lifePct + 0.5)), lifeColor(lifePct))
+            writeLine(mon, y, string.format(
+                "  %s %d%%",
+                progressBar(barInner, lifePct),
+                math.floor(lifePct + 0.5)
+            ), lifeColor(lifePct))
             y = y + 1
             if y > h then
                 break
@@ -282,6 +366,9 @@ function ui.draw(mon, cfg, states, globalErr)
             elseif s.alert == "soft" then
                 writeLine(mon, y, "  Предупреждение: мало стержней в запасе, проверь AE", colors.orange)
                 y = y + 1
+            elseif s.alert == "pellets" then
+                writeLine(mon, y, "  Тревога: мало гранул для цикла", colors.red)
+                y = y + 1
             end
         end
 
@@ -290,6 +377,18 @@ function ui.draw(mon, cfg, states, globalErr)
             y = y + 1
         end
     end
+
+    return hits
+end
+
+function ui.hit(hits, x, y)
+    for i = 1, #(hits or {}) do
+        local b = hits[i]
+        if b.y == y and x >= b.x1 and x <= b.x2 then
+            return b
+        end
+    end
+    return nil
 end
 
 return ui

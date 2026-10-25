@@ -12,8 +12,10 @@ local function empty()
         poll = 1,
         rod_cap = 5,
         text_scale = 0.5,
-        fuels = {}, -- item id -> heat number
-        reactors = {}, -- list of reactor rows
+        state_file = "fission_state.txt",
+        pellet = "tfg:terrafirmaguard_pa6",
+        fuels = {},
+        reactors = {},
     }
 end
 
@@ -56,38 +58,36 @@ local function parseLine(cfg, line, lineNo)
     end
 
     if key == "monitor" then
-        if not parts[2] or parts[2] == "" then
-            error(("%s line %s: monitor | side"):format(label, tostring(lineNo)))
-        end
-        cfg.monitor = parts[2]
+        cfg.monitor = parts[2] or error(("%s line %s: monitor | side"):format(label, tostring(lineNo)))
         return
     end
-
     if key == "ae" or key == "ae2" or key == "interface" then
-        if not parts[2] or parts[2] == "" then
-            error(("%s line %s: ae | peripheral"):format(label, tostring(lineNo)))
-        end
-        cfg.ae = parts[2]
+        cfg.ae = parts[2] or error(("%s line %s: ae | peripheral"):format(label, tostring(lineNo)))
         return
     end
-
     if key == "poll" or key == "interval" then
         setNumber(cfg, "poll", parts[2], lineNo, label)
         return
     end
-
     if key == "rod_cap" or key == "max_rods" or key == "cap" then
         setNumber(cfg, "rod_cap", parts[2], lineNo, label)
         return
     end
-
     if key == "text_scale" or key == "scale" or key == "font" or key == "font_scale" then
         setNumber(cfg, "text_scale", parts[2], lineNo, label)
         return
     end
+    if key == "state_file" or key == "dump" then
+        cfg.state_file = parts[2] or "fission_state.txt"
+        return
+    end
+    if key == "pellet" or key == "pellet_item" then
+        cfg.pellet = parts[2] or error(("%s line %s: pellet | item_id"):format(label, tostring(lineNo)))
+        return
+    end
 
     if key == "fuel" then
-        if not parts[2] or parts[2] == "" or not parts[3] or parts[3] == "" then
+        if not parts[2] or not parts[3] then
             error(("%s line %s: fuel | item_id | heat"):format(label, tostring(lineNo)))
         end
         local heat = tonumber(parts[3])
@@ -99,14 +99,33 @@ local function parseLine(cfg, line, lineNo)
     end
 
     if key == "reactor" then
-        -- reactor | label | controller | input | output | stock | allow...
+        -- label | controller | input | output | stock | allow | mode [| pellet_bus | pellets_need]
         if #parts < 7 then
-            error(("%s line %s: reactor | label | controller | input | output | stock | allow"):format(
+            error(("%s line %s: reactor | label | controller | input | output | stock | allow [| mode ...]"):format(
                 label, tostring(lineNo)))
         end
         local allowList, allowSet = parseAllow(parts[7])
         if #allowList == 0 then
-            error(("%s line %s: reactor needs at least one allow item"):format(label, tostring(lineNo)))
+            error(("%s line %s: reactor needs allow item"):format(label, tostring(lineNo)))
+        end
+        local control = "auto"
+        if parts[8] and parts[8] ~= "" then
+            local m = parts[8]:lower()
+            if m == "manual" or m == "ручной" or m == "ручн" then
+                control = "manual"
+            elseif m == "auto" or m == "авто" then
+                control = "auto"
+            else
+                error(("%s line %s: mode must be auto|manual, got %q"):format(label, tostring(lineNo), parts[8]))
+            end
+        end
+        local pelletBus = parts[9]
+        if pelletBus == "" then
+            pelletBus = nil
+        end
+        local pelletsNeed = tonumber(parts[10]) or 0
+        if pelletsNeed < 0 then
+            pelletsNeed = 0
         end
         cfg.reactors[#cfg.reactors + 1] = {
             label = parts[2],
@@ -117,6 +136,9 @@ local function parseLine(cfg, line, lineNo)
             allow = allowList,
             allowSet = allowSet,
             primary = allowList[1],
+            control = control,
+            pellet_bus = pelletBus,
+            pellets_need = pelletsNeed,
         }
         return
     end
@@ -144,7 +166,6 @@ function config.load(path)
     if cfg.rod_cap > 64 then
         cfg.rod_cap = 64
     end
-    -- CC monitors accept 0.5 .. 5.0 in 0.5 steps.
     local ts = tonumber(cfg.text_scale) or 0.5
     if ts < 0.5 then
         ts = 0.5
@@ -157,36 +178,11 @@ function config.load(path)
         end
     end
     cfg.text_scale = ts
-
-    if #cfg.reactors == 0 then
-        -- built-in layout if cfg missing reactors
-        local th, u = "tfg:thorium_rod", "tfg:uranium_rod"
-        if not cfg.fuels[th] then
-            cfg.fuels[th] = 0.7
-        end
-        if not cfg.fuels[u] then
-            cfg.fuels[u] = 2.2
-        end
-        cfg.reactors[1] = {
-            label = "Торий",
-            controller = "fission_reactor_0",
-            input = "gtceu:hv_input_bus_0",
-            output = "gtceu:hv_output_bus_0",
-            stock = "gtceu:wood_crate_2",
-            allow = { th },
-            allowSet = { [th] = true },
-            primary = th,
-        }
-        cfg.reactors[2] = {
-            label = "Уран",
-            controller = "fission_reactor_1",
-            input = "gtceu:hv_input_bus_1",
-            output = "gtceu:hv_output_bus_1",
-            stock = "gtceu:wood_crate_3",
-            allow = { u },
-            allowSet = { [u] = true },
-            primary = u,
-        }
+    if not cfg.state_file or cfg.state_file == "" then
+        cfg.state_file = "fission_state.txt"
+    end
+    if not cfg.pellet or cfg.pellet == "" then
+        cfg.pellet = "tfg:terrafirmaguard_pa6"
     end
 
     return cfg

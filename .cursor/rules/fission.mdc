@@ -1,41 +1,31 @@
 ---
-description: Dea's Fission — dual reactor fuel maintain (thorium / uranium), AE drain
+description: Dea's Fission — multi-reactor fuel maintain, auto/manual, pellet-cooled Pu
 globs: fission/**
 ---
 
 # fission
 
-One CC computer maintains two Dea's Fission (`deafission`) reactors in TFG: feed allowed rods only, drain output buses to AE, show status on a Russian monitor. Reactors auto-start when a rod hits the input bus — **wrong item must never be pushed**.
+One CC computer maintains Dea's Fission (`deafission`) reactors in TFG: feed allow-listed rods, drain outputs to AE, optional pellet cooling, Russian touch UI. Reactors auto-start when a rod hits the input bus — **wrong item must never be pushed**.
 
 ## Layout
 
-- Wired modem network; monitor **right** (status UI, Russian)
-- **R0 (thorium only):** `fission_reactor_0`, `gtceu:hv_input_bus_0`, `gtceu:hv_output_bus_0`
-- **R1 (uranium; later Pu / hybrid):** `fission_reactor_1`, `gtceu:hv_input_bus_1`, `gtceu:hv_output_bus_1`
-- Stock: `gtceu:wood_crate_2` = thorium (`tfg:thorium_rod`), `gtceu:wood_crate_3` = uranium (`tfg:uranium_rod`)
-- Depleted / all output-bus items → `ae2:interface_0`
-- CC API on controller: `getVersion`, `getMetrics`, `getFuels` only (no scram/activate)
+- Monitor **right** (touch); wired modem
+- **R0 Торий (auto):** `fission_reactor_0`, `hv_input_bus_0`, `hv_output_bus_0`, stock `wood_crate_2`
+- **R1 Уран (auto):** `fission_reactor_1`, `hv_input_bus_1`, `hv_output_bus_1`, stock `wood_crate_3`
+- **R2 Плутоний (manual):** `fission_reactor_2`, `hv_input_bus_2`, `hv_output_bus_2`, stock `wood_crate_4`, pellet bus `mv_input_bus_2`
+- Depleted / rejects / pellet source: `ae2:interface_0`
+- Pellet item: `tfg:terrafirmaguard_pa6` (empirically ~253/cycle @ max≈438; cfg **256** with margin)
 
 ## Behaviour
 
-1. **Rod target** from `getMetrics().temperatureMax` (holders change it), **cap 5**, **no overshoot margin**:  
-   `ss_1 = rodHeat * 200 / 1.01`  
-   `N = min(5, floor(temperatureMax / ss_1))`  
-   At max 420: thorium → 3, uranium → 0 (need max ≳ 436 for one U rod).
-2. **Fuel heat table** in cfg by item id (TFG): Th 0.7, U 2.2, Pu 3.0, TBU 2.0, Am241 0.5, Np237 2.0, Cf252 4.0. Crate `getItemDetail` does not expose heat — only `name` / damage / nbt hash.
-3. **Count installed** = `Σ getFuels()[i].rods` (same-NBT groups merge). Top up: push only allowed rods crate → that reactor’s input bus until `rods_total >= N` (or stock empty).
-4. **Modes** (`getMetrics().mode`): `DEFAULT` = normal feed OK; `COOLDOWN` = post-overheat cooling — **never feed**; `INCOMPLETE` = structure bad — never feed. UI shows Работает / Охлаждение / Не собран / Пауза / Простой.
-5. **R0 hard rule:** never push anything except `tfg:thorium_rod` to `hv_input_bus_0`. R1: uranium for now; cfg allow-list for future Pu/hybrid. If a disallowed item is already on an input bus, move it to **`ae2:interface_0` only** — never push anything into stock crates (crates are pull-only).
-6. **Output:** every tick/loop, pull **all** items from both HV output buses → `ae2:interface_0`. Live rods inside the reactor are not extractable via CC.
-7. **Stock alerts (monitor):** soft («Предупреждение») if crate count &lt; N; hard («Тревога») if crate count &lt; rods still needed. Wait when stock insufficient; do not substitute other fuels. Hint: «проверь AE».
-8. **Monitor:** both reactors — status/mode, heat now/max, rods + per-rod wear, ETA + life bar, stock alerts.
-
-## Non-goals / TODO
-
-- No redstone scram/port control; no coolant/pipe automation
-- No extracting partial-damage rods from the core
-- Plutonium / hybrid on R1 — allow-list later, same N formula
-- Probe `fission/probe.lua` is debug-only
+1. **Rod target** from `temperatureMax`, cap 5, no overshoot: `N = min(5, floor(Tmax / (rodHeat*200/1.01)))`.
+2. **Modes:** `DEFAULT` feed OK; `COOLDOWN` / `INCOMPLETE` never feed rods.
+3. **Control auto/manual** (per reactor): cfg default; **`fission_state.txt` dump overrides** (survives reboot). Dump > cfg.
+4. **Auto:** maintain rods to N (and keep pellet bus topped from AE if `pellets_need` set).
+5. **Manual:** no rod feed until touch **Цикл** (semi-auto). Before arming: require stock rods and, if configured, pellets ≥ `pellets_need`. Cycle **clears as soon as rods+pending ≥ target** (not on burnout). Touch again cancels if still idle.
+6. **UI buttons** (right of title): **Авто/Ручн** toggle; **Цикл** only in manual.
+7. Crates **pull-only**; scrub wrong input → AE; output → AE.
+8. Stock alerts: Предупреждение / Тревога (+ мало гранул).
 
 ## Deploy
 
@@ -43,4 +33,4 @@ One CC computer maintains two Dea's Fission (`deafission`) reactors in TFG: feed
 python tools/bundle_project.py fission
 ```
 
-Copy **both** `dist/fission.lua` and `fission.cfg` onto the computer.
+Copy `dist/fission.lua` + `fission.cfg`. Runtime creates/updates `fission_state.txt` on the computer.

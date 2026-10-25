@@ -79,6 +79,47 @@ function M.scrubInput(busName, allowSet, aeName)
     return moved
 end
 
+--- Count a single item id in an inventory.
+function M.countItem(invName, itemId)
+    if not invName or not itemId then
+        return 0
+    end
+    return transfer.countItem(invName, itemId)
+end
+
+--- Pellets available: AE source + already on pellet bus.
+function M.countPellets(cfg, reactorCfg)
+    local item = cfg.pellet
+    local n = 0
+    if cfg.ae then
+        n = n + M.countItem(cfg.ae, item)
+    end
+    if reactorCfg.pellet_bus then
+        n = n + M.countItem(reactorCfg.pellet_bus, item)
+    end
+    return n
+end
+
+--- Keep pellet bus topped up from AE while a cycle needs cooling.
+function M.feedPellets(cfg, reactorCfg, wantOnBus)
+    wantOnBus = tonumber(wantOnBus) or 8
+    local item = cfg.pellet
+    local bus = reactorCfg.pellet_bus
+    local ae = cfg.ae
+    if not bus or not ae or not item then
+        return 0
+    end
+    if not peripheral.isPresent(bus) or not peripheral.isPresent(ae) then
+        return 0
+    end
+    local onBus = M.countItem(bus, item)
+    local need = wantOnBus - onBus
+    if need <= 0 then
+        return 0
+    end
+    return transfer(ae, bus, item, need)
+end
+
 --- Count stock items matching any allow-list id.
 function M.countStock(stockName, allowList)
     if not stockName or not allowList then

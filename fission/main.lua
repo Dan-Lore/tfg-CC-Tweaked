@@ -1,6 +1,7 @@
--- Dea's Fission dual-reactor fuel maintain (TFG).
+-- Dea's Fission multi-reactor fuel maintain (TFG).
 -- Bundle:  python tools/bundle_project.py fission
 -- Deploy:  dist/fission.lua + fission.cfg
+-- Runtime: fission_state.txt (modes / one-cycle; overrides cfg)
 
 package.path = package.path
     .. ";/fission/?.lua;fission/?.lua;/shared/?.lua;shared/?.lua"
@@ -9,27 +10,81 @@ local configMod = require("config")
 local fuels = require("fuels")
 local inv = require("inv")
 local ui = require("ui")
+local stateMod = require("state")
 local net_watch = require("net_watch")
 
 local cfg = configMod.load()
-local mon = nil
+local runtime, statePath, loadedDump = stateMod.load(cfg)
+local mon, monName = nil, nil
+local hitboxes = {}
+local dirtyState = false
+
+print("fission: reactors=" .. tostring(#cfg.reactors)
+    .. " dump=" .. tostring(statePath)
+    .. (loadedDump and " (loaded)" or " (defaults)"))
+
+local function saveRuntime()
+    local ok, path = stateMod.save(cfg, runtime)
+    if ok then
+        dirtyState = false
+        print("fission: saved " .. tostring(path))
+    else
+        print("fission: FAILED save " .. tostring(path))
+    end
+end
+
+local function rtFor(r)
+    local row = runtime[r.controller]
+    if not row then
+        row = {
+            controller = r.controller,
+            label = r.label,
+            control = r.control or "auto",
+            cycle = false,
+        }
+        runtime[r.controller] = row
+    end
+    return row
+end
+
+local function wantsFeed(r, st)
+    local row = rtFor(r)
+    if not st.canFeed then
+        return false
+    end
+    if row.control == "auto" then
+        return st.needed > 0
+    end
+    -- manual: only while one-cycle is armed
+    return row.cycle and st.needed > 0
+end
+
+local function needsPelletCheck(r)
+    return (tonumber(r.pellets_need) or 0) > 0 and r.pellet_bus ~= nil
+end
+
+local function pelletsOk(r)
+    if not needsPelletCheck(r) then
+        return true, 0
+    end
+    local n = inv.countPellets(cfg, r)
+    return n >= (r.pellets_need or 0), n
+end
 
 local function readReactor(r)
+    local row = rtFor(r)
     local state = {
         label = r.label,
         primary = r.primary,
         ok = false,
-        running = false,
-        heat = 0,
-        maxHeat = 0,
+        control = row.control,
+        cycle = row.cycle,
+        pellets_need = tonumber(r.pellets_need) or 0,
+        pellets = 0,
         rods = 0,
-        heatSum = 0,
-        target = 0,
-        stock = 0,
         needed = 0,
         alert = nil,
         err = nil,
-        temperatureMax = 0,
     }
 
     if not peripheral.isPresent(r.controller) then
@@ -38,12 +93,8 @@ local function readReactor(r)
     end
 
     local okM, metrics = pcall(peripheral.call, r.controller, "getMetrics")
-    if not okM then
+    if not okM or type(metrics) ~= "table" then
         state.err = "getMetrics: " .. tostring(metrics)
-        return state
-    end
-    if type(metrics) ~= "table" then
-        state.err = "getMetrics пусто"
         return state
     end
 
@@ -63,15 +114,13 @@ local function readReactor(r)
     local primaryHeat = fuels.heatOf(cfg, r.primary) or 0
     local target = fuels.targetN(tMax, primaryHeat, cfg.rod_cap)
     local mode = tostring(metrics.mode or "DEFAULT"):upper()
-
     local pending = inv.countPending(r.input, r.allowSet)
 
-    -- Feed only in normal operation. COOLDOWN = post-overheat; do not add rods.
     local canFeed = (mode == "DEFAULT")
-
     local status, statusColor
     if mode == "COOLDOWN" then
         status, statusColor = "Охлаждение", "orange"
+        canFeed = false
     elseif mode == "INCOMPLETE" then
         status, statusColor = "Не собран", "red"
         canFeed = false
@@ -82,6 +131,8 @@ local function readReactor(r)
     else
         status, statusColor = "Простой", "orange"
     end
+
+    local pok, pelletCount = pelletsOk(r)
 
     state.ok = true
     state.rods = rods
@@ -101,6 +152,7 @@ local function readReactor(r)
     state.remainDur = remain
     state.maxDur = maxDur
     state.lifePct = (maxDur > 0) and (100 * remain / maxDur) or 0
+    state.pellets = pelletCount
     if mode == "COOLDOWN" then
         state.etaSec = nil
         state.etaNote = "охлаждение после перегрева"
@@ -108,7 +160,6 @@ local function readReactor(r)
         state.etaSec = fuels.etaSeconds(remain, fuelDmg)
         state.etaNote = nil
     end
-    -- Do not double-feed rods waiting on the input hatch.
     state.needed = math.max(0, target - rods - pending)
 
     state.stock = inv.countStock(r.stock, r.allow)
@@ -117,14 +168,28 @@ local function readReactor(r)
     elseif state.stock < target then
         state.alert = "soft"
     end
+    if needsPelletCheck(r) and not pok and (row.control == "auto" or row.cycle) then
+        state.alert = "pellets"
+    end
+
+    -- Manual one-cycle: disarm as soon as enough rods are in (core + input pending).
+    -- Do not wait for burnout — pellets sit with spare and are unrelated to cycle end.
+    if row.control == "manual" and row.cycle and target > 0
+        and (rods + pending) >= target
+    then
+        row.cycle = false
+        row._cycleStarted = false
+        state.cycle = false
+        dirtyState = true
+    end
 
     return state
 end
 
 local function tickOne(r)
     local notes = {}
+    local row = rtFor(r)
 
-    -- Always drain output → AE first (depleted / spit items).
     if peripheral.isPresent(r.output) and peripheral.isPresent(cfg.ae) then
         local n = inv.drainAll(r.output, cfg.ae)
         if n > 0 then
@@ -132,7 +197,6 @@ local function tickOne(r)
         end
     end
 
-    -- Scrub wrong fuel from input → AE (never into crates).
     if peripheral.isPresent(r.input) and peripheral.isPresent(cfg.ae) then
         local n = inv.scrubInput(r.input, r.allowSet, cfg.ae)
         if n > 0 then
@@ -140,27 +204,131 @@ local function tickOne(r)
         end
     end
 
-    local state = readReactor(r)
+    local st = readReactor(r)
 
-    -- Feed only in DEFAULT mode; never during COOLDOWN (overheat recovery).
-    if state.ok and state.canFeed and state.needed > 0 then
-        local pushed = inv.feedRods(cfg, r, state)
+    -- Top up pellets while auto-running or manual cycle armed / rods present.
+    local pelletActive = needsPelletCheck(r)
+        and st.ok
+        and (row.control == "auto" or row.cycle or (st.rods or 0) > 0)
+    if pelletActive then
+        local moved = inv.feedPellets(cfg, r, 16)
+        if moved > 0 then
+            notes[#notes + 1] = "pellet +" .. moved
+            st.pellets = inv.countPellets(cfg, r)
+        end
+    end
+
+    local allowRods = wantsFeed(r, st)
+    if allowRods and needsPelletCheck(r) then
+        local okP = select(1, pelletsOk(r))
+        if not okP then
+            allowRods = false
+            st.alert = "pellets"
+            notes[#notes + 1] = "wait pellets"
+        end
+    end
+
+    if allowRods then
+        local pushed = inv.feedRods(cfg, r, st)
         if pushed > 0 then
             notes[#notes + 1] = "feed +" .. pushed
-            state = readReactor(r)
+            st = readReactor(r) -- may clear cycle once target rods are in
         end
-    elseif state.ok and state.mode == "COOLDOWN" then
+    elseif st.ok and st.mode == "COOLDOWN" then
         notes[#notes + 1] = "cooldown: no feed"
     end
 
-    state.notes = notes
-    return state
+    st.notes = notes
+    st.control = row.control
+    st.cycle = row.cycle
+    return st
+end
+
+local function onToggleMode(index)
+    local r = cfg.reactors[index]
+    if not r then
+        return
+    end
+    local row = rtFor(r)
+    if row.control == "auto" then
+        row.control = "manual"
+        row.cycle = false
+        row._cycleStarted = false
+    else
+        row.control = "auto"
+        row.cycle = false
+        row._cycleStarted = false
+    end
+    dirtyState = true
+    saveRuntime()
+    print("fission: " .. r.label .. " → " .. row.control)
+end
+
+local function onOneCycle(index)
+    local r = cfg.reactors[index]
+    if not r then
+        return
+    end
+    local row = rtFor(r)
+    if row.control ~= "manual" then
+        return
+    end
+    if row.cycle then
+        -- cancel armed cycle if idle
+        row.cycle = false
+        row._cycleStarted = false
+        dirtyState = true
+        saveRuntime()
+        print("fission: " .. r.label .. " цикл отменён")
+        return
+    end
+    if needsPelletCheck(r) then
+        local okP, n = pelletsOk(r)
+        if not okP then
+            print("fission: " .. r.label .. " мало гранул ("
+                .. tostring(n) .. "/" .. tostring(r.pellets_need) .. ")")
+            return
+        end
+    end
+    local stock = inv.countStock(r.stock, r.allow)
+    if stock < 1 then
+        print("fission: " .. r.label .. " нет стержней в запасе")
+        return
+    end
+    row.cycle = true
+    row._cycleStarted = false
+    dirtyState = true
+    saveRuntime()
+    print("fission: " .. r.label .. " цикл вооружён")
+    -- If target already met, readReactor will disarm immediately.
+end
+
+local function handleTouch(x, y)
+    local hit = ui.hit(hitboxes, x, y)
+    if not hit then
+        return
+    end
+    if hit.action == "toggle_mode" then
+        onToggleMode(hit.index)
+    elseif hit.action == "one_cycle" then
+        onOneCycle(hit.index)
+    end
+end
+
+local function redraw(states, globalErr)
+    if not mon or not mon.getSize then
+        mon, monName = ui.find(cfg)
+    end
+    hitboxes = ui.draw(mon, cfg, states, globalErr)
 end
 
 local function main()
-    print("fission: start, reactors=" .. tostring(#cfg.reactors))
-    mon = select(1, ui.find(cfg))
+    mon, monName = ui.find(cfg)
+    if not loadedDump then
+        saveRuntime()
+    end
 
+    local timer = os.startTimer(cfg.poll)
     while true do
         local globalErr = nil
         if not peripheral.isPresent(cfg.ae) then
@@ -169,34 +337,44 @@ local function main()
 
         local states = {}
         for i = 1, #cfg.reactors do
-            local r = cfg.reactors[i]
-            local st = tickOne(r)
-            states[i] = st
-            local msg = string.format(
-                "fission R%d %s rods=%d/%d heat=%.1f/%s stock=%d %s",
+            states[i] = tickOne(cfg.reactors[i])
+            local st = states[i]
+            print(string.format(
+                "fission R%d %s %s rods=%d/%d pellets=%s %s",
                 i - 1,
-                r.label or "",
+                st.label or "",
+                st.control or "?",
                 st.rods or 0,
                 st.target or 0,
-                tonumber(st.heat) or 0,
-                tostring(st.maxHeat or "?"),
-                st.stock or 0,
-                st.alert or (st.err or "ok")
-            )
-            if st.notes and #st.notes > 0 then
-                msg = msg .. " [" .. table.concat(st.notes, ", ") .. "]"
-            end
-            print(msg)
+                st.pellets_need and st.pellets_need > 0 and tostring(st.pellets or 0) or "-",
+                st.alert or st.err or "ok"
+            ))
             net_watch.yieldWatch()
         end
 
-        if not mon or not mon.getSize then
-            mon = select(1, ui.find(cfg))
+        if dirtyState then
+            saveRuntime()
         end
-        ui.draw(mon, cfg, states, globalErr)
 
-        if net_watch.sleepWatch(cfg.poll) then
-            mon = select(1, ui.find(cfg))
+        redraw(states, globalErr)
+
+        while true do
+            local ev, a, b, c = os.pullEvent()
+            if ev == "timer" and a == timer then
+                timer = os.startTimer(cfg.poll)
+                break
+            elseif ev == "monitor_touch" and (not monName or a == monName or a == cfg.monitor) then
+                handleTouch(b, c)
+                -- refresh immediately after touch
+                local states2 = {}
+                for i = 1, #cfg.reactors do
+                    -- re-read without full tick side-effects for snappy UI
+                    states2[i] = readReactor(cfg.reactors[i])
+                end
+                redraw(states2, globalErr)
+            elseif ev == "peripheral" or ev == "peripheral_detach" then
+                mon, monName = ui.find(cfg)
+            end
         end
     end
 end
