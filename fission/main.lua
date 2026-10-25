@@ -67,6 +67,7 @@ local function pelletsOk(r)
     if not needsPelletCheck(r) then
         return true, 0
     end
+    -- pellet_bus + AE interface buffer; all cfg.pellets ids (PA6 / refrigerant).
     local n = inv.countPellets(cfg, r)
     return n >= (r.pellets_need or 0), n
 end
@@ -113,7 +114,8 @@ local function readReactor(r)
     local heating = tonumber(metrics.heating) or 0
     local primaryHeat = fuels.heatOf(cfg, r.primary) or 0
     local target = fuels.targetN(tMax, primaryHeat, cfg.rod_cap)
-    local mode = tostring(metrics.mode or "DEFAULT"):upper()
+    -- Mode from Dea's Fission enum toString(); tolerate junk whitespace.
+    local mode = tostring(metrics.mode or "DEFAULT"):upper():gsub("%s+", "")
     local pending = inv.countPending(r.input, r.allowSet)
 
     local canFeed = (mode == "DEFAULT")
@@ -130,6 +132,11 @@ local function readReactor(r)
         status, statusColor = "Пауза", "yellow"
     else
         status, statusColor = "Простой", "orange"
+    end
+    -- Unknown mode: do not feed, but say so (avoids silent idle).
+    if mode ~= "DEFAULT" and mode ~= "COOLDOWN" and mode ~= "INCOMPLETE" then
+        canFeed = false
+        status, statusColor = "Режим " .. mode, "red"
     end
 
     local pok, pelletCount = pelletsOk(r)
@@ -157,7 +164,10 @@ local function readReactor(r)
         state.etaSec = nil
         state.etaNote = "охлаждение после перегрева"
     else
-        state.etaSec = fuels.etaSeconds(remain, fuelDmg)
+        -- Rate at heat_ss (not live heat): while warming up, live fuelDamage is
+        -- low and "Осталось" looked way too long, then collapsed as heat rose.
+        local etaRate = fuels.etaDamageRate(rods, heatSum, heat, fuelDmg)
+        state.etaSec = fuels.etaSeconds(remain, etaRate)
         state.etaNote = nil
     end
     state.needed = math.max(0, target - rods - pending)
@@ -170,6 +180,13 @@ local function readReactor(r)
     end
     if needsPelletCheck(r) and not pok and (row.control == "auto" or row.cycle) then
         state.alert = "pellets"
+    end
+
+    -- Peripheral presence (stock count can be 0 when missing — surface it).
+    if not peripheral.isPresent(r.stock) then
+        state.feedErr = "нет склада " .. tostring(r.stock)
+    elseif not peripheral.isPresent(r.input) then
+        state.feedErr = "нет входа " .. tostring(r.input)
     end
 
     -- Manual one-cycle: disarm as soon as enough rods are in (core + input pending).
@@ -232,10 +249,20 @@ local function tickOne(r)
         local pushed = inv.feedRods(cfg, r, st)
         if pushed > 0 then
             notes[#notes + 1] = "feed +" .. pushed
+            local feedErr = st.feedErr
             st = readReactor(r) -- may clear cycle once target rods are in
+            st.feedErr = feedErr
+        elseif st.feedErr then
+            notes[#notes + 1] = "feed fail: " .. tostring(st.feedErr)
+            print("fission: " .. tostring(r.label) .. " " .. tostring(st.feedErr))
         end
     elseif st.ok and st.mode == "COOLDOWN" then
         notes[#notes + 1] = "cooldown: no feed"
+        if (st.needed or 0) > 0 then
+            st.feedErr = st.feedErr or "охлаждение — не подаём"
+        end
+    elseif st.ok and not st.canFeed and (st.needed or 0) > 0 then
+        st.feedErr = st.feedErr or ("режим " .. tostring(st.mode) .. " — не подаём")
     end
 
     st.notes = notes
@@ -328,7 +355,10 @@ local function main()
         saveRuntime()
     end
 
-    local timer = os.startTimer(cfg.poll)
+    -- Event loop matches origin/main: tick → draw → sleepWatch(poll).
+    -- Do NOT start the poll timer before tickOne: yieldWatch/sleep inside
+    -- inv/transfer would swallow that timer id and the UI hangs forever on
+    -- a stale frame (looks like "wrong rod count").
     while true do
         local globalErr = nil
         if not peripheral.isPresent(cfg.ae) then
@@ -339,16 +369,16 @@ local function main()
         for i = 1, #cfg.reactors do
             states[i] = tickOne(cfg.reactors[i])
             local st = states[i]
-            print(string.format(
-                "fission R%d %s %s rods=%d/%d pellets=%s %s",
-                i - 1,
-                st.label or "",
-                st.control or "?",
-                st.rods or 0,
-                st.target or 0,
-                st.pellets_need and st.pellets_need > 0 and tostring(st.pellets or 0) or "-",
-                st.alert or st.err or "ok"
-            ))
+            if st.err or st.feedErr or st.alert == "hard" or st.alert == "pellets" then
+                print(string.format(
+                    "fission R%d %s rods=%d/%d %s",
+                    i - 1,
+                    st.label or "",
+                    st.rods or 0,
+                    st.target or 0,
+                    st.feedErr or st.alert or st.err or "?"
+                ))
+            end
             net_watch.yieldWatch()
         end
 
@@ -358,20 +388,17 @@ local function main()
 
         redraw(states, globalErr)
 
+        -- Wait poll interval. On touch: apply action and break into a full tick.
+        -- Do NOT readReactor/count here — transfer.countItem uses sleep(0), which
+        -- discards our poll timer and freezes the UI on a stale frame.
+        local timer = os.startTimer(cfg.poll)
         while true do
             local ev, a, b, c = os.pullEvent()
             if ev == "timer" and a == timer then
-                timer = os.startTimer(cfg.poll)
                 break
             elseif ev == "monitor_touch" and (not monName or a == monName or a == cfg.monitor) then
                 handleTouch(b, c)
-                -- refresh immediately after touch
-                local states2 = {}
-                for i = 1, #cfg.reactors do
-                    -- re-read without full tick side-effects for snappy UI
-                    states2[i] = readReactor(cfg.reactors[i])
-                end
-                redraw(states2, globalErr)
+                break
             elseif ev == "peripheral" or ev == "peripheral_detach" then
                 mon, monName = ui.find(cfg)
             end

@@ -21,8 +21,8 @@ One CC computer maintains Dea's Fission (`deafission`) reactors in TFG: feed all
 1. **Rod target** from `temperatureMax`, cap 5, no overshoot: `N = min(5, floor(Tmax / (rodHeat*200/1.01)))`.
 2. **Modes:** `DEFAULT` feed OK; `COOLDOWN` / `INCOMPLETE` never feed rods.
 3. **Control auto/manual** (per reactor): cfg default; **`fission_state.txt` dump overrides** (survives reboot). Dump > cfg.
-4. **Auto:** maintain rods to N (and keep pellet bus topped from AE if `pellets_need` set).
-5. **Manual:** no rod feed until touch **Цикл** (semi-auto). Before arming: require stock rods and, if configured, pellets ≥ `pellets_need`. Cycle **clears as soon as rods+pending ≥ target** (not on burnout). Touch again cancels if still idle.
+4. **Auto:** maintain rods to N. Pellet bus is topped by **in-world AE export** (CC must not `list()` the AE interface — freezes the computer).
+5. **Manual:** no rod feed until touch **Цикл** (semi-auto). Before arming: require stock rods and, if configured, pellets on **pellet_bus** ≥ `pellets_need` (pre-fill bus; do not scan AE). Cycle **clears as soon as rods+pending ≥ target** (not on burnout). Touch again cancels if still idle.
 6. **UI buttons** (right of title): **Авто/Ручн** toggle; **Цикл** only in manual.
 7. Crates **pull-only**; scrub wrong input → AE; output → AE.
 8. Stock alerts: Предупреждение / Тревога (+ мало гранул).

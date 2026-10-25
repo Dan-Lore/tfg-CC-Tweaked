@@ -134,6 +134,9 @@ local function transferItems(from, to, itemQuery, amount)
 
     local n = 0
     for slot, item in pairs(listed) do
+        if not moveAll and movedTotal >= amount then
+            break
+        end
         if moveAll or movedTotal < amount then
             local detail = slotDetail(source, slot, itemQuery, item.name)
             if slotUsable(item.name, detail, itemQuery) then

@@ -113,6 +113,17 @@ local function writeAt(mon, x, y, text, color)
     mon.write(tostring(text or ""))
 end
 
+local function cols(text)
+    text = tostring(text or "")
+    if utf8 and utf8.len then
+        local n = utf8.len(text)
+        if n then
+            return n
+        end
+    end
+    return #text
+end
+
 local function writeLine(mon, y, text, color)
     local w = mon.getSize()
     mon.setCursorPos(1, y)
@@ -125,19 +136,30 @@ local function writeLine(mon, y, text, color)
     mon.write(truncateCols(text, w))
 end
 
+--- Solid button via blit; label centered in [x1..x2].
 local function paintButton(mon, btn, fg, bg)
     local mw = mon.getSize()
-    if btn.x1 > mw then
+    if btn.x1 > mw or btn.x1 > btn.x2 then
         return
     end
     local width = btn.x2 - btn.x1 + 1
-    mon.setBackgroundColor(bg or colors.gray)
-    mon.setTextColor(fg or colors.white)
+    local label = truncateCols(tostring(btn.label or ""), width)
+    local len = cols(label)
+    local padL = math.max(0, math.floor((width - len) / 2))
+    local padR = math.max(0, width - len - padL)
+    local text = string.rep(" ", padL) .. label .. string.rep(" ", padR)
+    local n = cols(text)
+    if n < width then
+        text = text .. string.rep(" ", width - n)
+    elseif n > width then
+        text = truncateCols(text, width)
+    end
+    local f = colors.toBlit(fg or colors.white)
+    local b = colors.toBlit(bg or colors.gray)
     mon.setCursorPos(btn.x1, btn.y)
-    mon.write(string.rep(" ", width))
-    mon.setCursorPos(btn.x1, btn.y)
-    mon.write(truncateCols(tostring(btn.label or ""), width))
+    mon.blit(text, string.rep(f, width), string.rep(b, width))
     mon.setBackgroundColor(colors.black)
+    mon.setTextColor(colors.white)
 end
 
 function ui.find(cfg)
@@ -181,39 +203,33 @@ function ui.draw(mon, cfg, states, globalErr)
         local title = string.format("R%d %s", i - 1, s.label or "")
         writeLine(mon, y, title, colors.lightBlue)
 
-        -- Buttons on the right of the title row.
+        -- Buttons on the title row: Авто/Ручн share the same right edge;
+        -- «Запуск 1 цикла» sits to the left of Ручн (not flush to monitor edge).
         local btnY = y
-        local cycleW, modeW = 6, 5
+        local isManual = s.control == "manual"
+        local armed = s.cycle == true
+        local modeLabel = isManual and "Ручн" or "Авто"
+        local cycleLabel = armed and "Запуск 1 цикла*" or "Запуск 1 цикла"
+        local modeW = cols(modeLabel) + 2 -- 1 col pad each side
+        local cycleW = cols(cycleLabel) + 2
         local gap = 1
-        local cycleX2 = w
-        local cycleX1 = cycleX2 - cycleW + 1
-        local modeX2 = cycleX1 - gap - 1
+        local edgePad = 1 -- leave a column so buttons don't stick to the rim
+        local modeX2 = w - edgePad
         local modeX1 = modeX2 - modeW + 1
-        if modeX1 > #title + 2 then
-            local isManual = s.control == "manual"
-            local modeBtn = {
-                x1 = modeX1,
-                x2 = modeX2,
-                y = btnY,
-                label = isManual and "Ручн" or "Авто",
-                action = "toggle_mode",
-                index = i,
-            }
-            paintButton(
-                mon,
-                modeBtn,
-                colors.white,
-                isManual and colors.orange or colors.green
-            )
-            hits[#hits + 1] = modeBtn
-
-            if isManual then
-                local armed = s.cycle == true
+        local cycleX1, cycleX2
+        if isManual then
+            cycleX2 = modeX1 - gap - 1
+            cycleX1 = cycleX2 - cycleW + 1
+        end
+        local titleCols = cols(title)
+        local leftMost = (cycleX1 and cycleX1 < modeX1) and cycleX1 or modeX1
+        if leftMost > titleCols + 2 then
+            if isManual and cycleX1 then
                 local cycleBtn = {
                     x1 = cycleX1,
                     x2 = cycleX2,
                     y = btnY,
-                    label = armed and "Цикл*" or "Цикл",
+                    label = cycleLabel,
                     action = "one_cycle",
                     index = i,
                 }
@@ -225,6 +241,22 @@ function ui.draw(mon, cfg, states, globalErr)
                 )
                 hits[#hits + 1] = cycleBtn
             end
+
+            local modeBtn = {
+                x1 = modeX1,
+                x2 = modeX2,
+                y = btnY,
+                label = modeLabel,
+                action = "toggle_mode",
+                index = i,
+            }
+            paintButton(
+                mon,
+                modeBtn,
+                colors.white,
+                isManual and colors.orange or colors.green
+            )
+            hits[#hits + 1] = modeBtn
         end
 
         y = y + 1
@@ -332,18 +364,21 @@ function ui.draw(mon, cfg, states, globalErr)
             end
 
             local lifePct = tonumber(s.lifePct) or 0
+            local rodsNow = tonumber(s.rods) or 0
+            -- Empty / idle: gray, not red (red = fuel almost gone while running).
+            local barColor = (rodsNow <= 0) and colors.gray or lifeColor(lifePct)
             local eta = formatDuration(s.etaSec)
             local etaLine
             if s.etaNote then
                 etaLine = "  Осталось: " .. tostring(s.etaNote)
             elseif eta then
                 etaLine = "  Осталось: " .. eta
-            elseif (tonumber(s.rods) or 0) <= 0 then
+            elseif rodsNow <= 0 then
                 etaLine = "  Осталось: —"
             else
                 etaLine = "  Осталось: ? (нет износа/тик)"
             end
-            writeLine(mon, y, etaLine, lifeColor(lifePct))
+            writeLine(mon, y, etaLine, barColor)
             y = y + 1
             if y > h then
                 break
@@ -354,7 +389,7 @@ function ui.draw(mon, cfg, states, globalErr)
                 "  %s %d%%",
                 progressBar(barInner, lifePct),
                 math.floor(lifePct + 0.5)
-            ), lifeColor(lifePct))
+            ), barColor)
             y = y + 1
             if y > h then
                 break
@@ -368,6 +403,10 @@ function ui.draw(mon, cfg, states, globalErr)
                 y = y + 1
             elseif s.alert == "pellets" then
                 writeLine(mon, y, "  Тревога: мало гранул для цикла", colors.red)
+                y = y + 1
+            end
+            if s.feedErr and y <= h then
+                writeLine(mon, y, "  Подача: " .. tostring(s.feedErr), colors.red)
                 y = y + 1
             end
         end

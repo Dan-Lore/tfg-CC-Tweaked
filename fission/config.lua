@@ -13,7 +13,9 @@ local function empty()
         rod_cap = 5,
         text_scale = 0.5,
         state_file = "fission_state.txt",
+        -- Primary id (feed) + full list (count). TFG: PA6 and refrigerant_pellet both cool.
         pellet = "tfg:terrafirmaguard_pa6",
+        pellets = { "tfg:terrafirmaguard_pa6", "tfg:refrigerant_pellet" },
         fuels = {},
         reactors = {},
     }
@@ -82,7 +84,26 @@ local function parseLine(cfg, line, lineNo)
         return
     end
     if key == "pellet" or key == "pellet_item" then
-        cfg.pellet = parts[2] or error(("%s line %s: pellet | item_id"):format(label, tostring(lineNo)))
+        local id = parts[2] or error(("%s line %s: pellet | item_id"):format(label, tostring(lineNo)))
+        if not cfg.pellets then
+            cfg.pellets = {}
+        end
+        -- First pellet line is the preferred feed id; further lines are aliases for counting.
+        if #cfg.pellets == 0 then
+            cfg.pellet = id
+            cfg.pellets[1] = id
+        else
+            local seen = false
+            for i = 1, #cfg.pellets do
+                if cfg.pellets[i] == id then
+                    seen = true
+                    break
+                end
+            end
+            if not seen then
+                cfg.pellets[#cfg.pellets + 1] = id
+            end
+        end
         return
     end
 
@@ -181,8 +202,11 @@ function config.load(path)
     if not cfg.state_file or cfg.state_file == "" then
         cfg.state_file = "fission_state.txt"
     end
+    if not cfg.pellets or #cfg.pellets == 0 then
+        cfg.pellets = { "tfg:terrafirmaguard_pa6", "tfg:refrigerant_pellet" }
+    end
     if not cfg.pellet or cfg.pellet == "" then
-        cfg.pellet = "tfg:terrafirmaguard_pa6"
+        cfg.pellet = cfg.pellets[1]
     end
 
     return cfg

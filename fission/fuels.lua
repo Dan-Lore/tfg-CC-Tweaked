@@ -41,22 +41,28 @@ function fuels.targetN(temperatureMax, rodHeat, rodCap)
     return n
 end
 
+--- Iterate getFuels() entries (1-based, 0-based, or sparse keys).
+local function eachFuel(fuelList, fn)
+    if type(fuelList) ~= "table" then
+        return
+    end
+    for k, e in pairs(fuelList) do
+        if type(e) == "table" and (type(k) == "number" or tonumber(e.rods)) then
+            fn(e)
+        end
+    end
+end
+
 --- Sum rods + total fuel-heat from getFuels() table.
 function fuels.summarizeInstalled(fuelList)
     local rods = 0
     local heatSum = 0
-    if type(fuelList) ~= "table" then
-        return rods, heatSum
-    end
-    for i = 1, #fuelList do
-        local e = fuelList[i]
-        if e then
-            local r = tonumber(e.rods) or 0
-            local h = tonumber(e.heat) or 0
-            rods = rods + r
-            heatSum = heatSum + h * r
-        end
-    end
+    eachFuel(fuelList, function(e)
+        local r = tonumber(e.rods) or 0
+        local h = tonumber(e.heat) or 0
+        rods = rods + r
+        heatSum = heatSum + h * r
+    end)
     return rods, heatSum
 end
 
@@ -64,26 +70,57 @@ end
 -- Group with rods=N shares one damage value → count N times.
 function fuels.durabilityTotals(fuelList)
     local remain, maxTotal = 0, 0
-    if type(fuelList) ~= "table" then
-        return remain, maxTotal
-    end
-    for i = 1, #fuelList do
-        local e = fuelList[i]
-        if e then
-            local r = tonumber(e.rods) or 0
-            local dmg = tonumber(e.damage) or 0
-            local maxD = tonumber(e.maxDamage) or 0
-            if r > 0 and maxD > 0 then
-                local left = maxD - dmg
-                if left < 0 then
-                    left = 0
-                end
-                remain = remain + left * r
-                maxTotal = maxTotal + maxD * r
+    eachFuel(fuelList, function(e)
+        local r = tonumber(e.rods) or 0
+        local dmg = tonumber(e.damage) or 0
+        local maxD = tonumber(e.maxDamage) or 0
+        if r > 0 and maxD > 0 then
+            local left = maxD - dmg
+            if left < 0 then
+                left = 0
             end
+            remain = remain + left * r
+            maxTotal = maxTotal + maxD * r
         end
-    end
+    end)
     return remain, maxTotal
+end
+
+--- Steady-state reactor heat from installed fuel-heat (full coolant, no pellets).
+-- heat_ss ≈ heatSum * 200 / 1.01
+function fuels.heatSs(heatSum)
+    heatSum = tonumber(heatSum) or 0
+    if heatSum <= 0 then
+        return 0
+    end
+    return heatSum * SS_FACTOR
+end
+
+--- Dea's Fission: fuelDamage ≈ rods * Heat / 500 per game tick.
+function fuels.fuelDamageAtHeat(rods, heat)
+    rods = tonumber(rods) or 0
+    heat = tonumber(heat) or 0
+    if rods <= 0 or heat <= 0 then
+        return 0
+    end
+    return rods * heat / 500
+end
+
+--- Burn rate for ETA: use steady-state heat so the timer does not look
+-- "long" while the core is still climbing, then crash as heat rises.
+-- If live heat is already above ss, use live heat (faster wear).
+function fuels.etaDamageRate(rods, heatSum, heat, fuelDamageLive)
+    local ss = fuels.heatSs(heatSum)
+    local rateHeat = ss
+    heat = tonumber(heat) or 0
+    if heat > rateHeat then
+        rateHeat = heat
+    end
+    local fromFormula = fuels.fuelDamageAtHeat(rods, rateHeat)
+    if fromFormula > 0 then
+        return fromFormula
+    end
+    return tonumber(fuelDamageLive) or 0
 end
 
 --- ETA seconds from remaining durability / fuelDamage per game tick.
@@ -102,33 +139,27 @@ end
 function fuels.wearEntries(fuelList)
     local out = {}
     local idx = 0
-    if type(fuelList) ~= "table" then
-        return out
-    end
-    for i = 1, #fuelList do
-        local e = fuelList[i]
-        if e then
-            local r = tonumber(e.rods) or 0
-            local dmg = tonumber(e.damage) or 0
-            local maxD = tonumber(e.maxDamage) or 0
-            local pct = 0
-            if maxD > 0 then
-                pct = (100 * dmg) / maxD
-            end
-            if r < 1 then
-                r = 0
-            end
-            for _ = 1, r do
-                idx = idx + 1
-                out[#out + 1] = {
-                    index = idx,
-                    damage = dmg,
-                    maxDamage = maxD,
-                    pct = pct,
-                }
-            end
+    eachFuel(fuelList, function(e)
+        local r = tonumber(e.rods) or 0
+        local dmg = tonumber(e.damage) or 0
+        local maxD = tonumber(e.maxDamage) or 0
+        local pct = 0
+        if maxD > 0 then
+            pct = (100 * dmg) / maxD
         end
-    end
+        if r < 1 then
+            r = 0
+        end
+        for _ = 1, r do
+            idx = idx + 1
+            out[#out + 1] = {
+                index = idx,
+                damage = dmg,
+                maxDamage = maxD,
+                pct = pct,
+            }
+        end
+    end)
     return out
 end
 

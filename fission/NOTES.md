@@ -79,6 +79,8 @@ Steady (full fluid coolant + P pellets), 1× Pu heating = 600 HU/t:
 - `fission_reactor_2` + `hv_input_bus_2` / `hv_output_bus_2` + stock `wood_crate_4`
 - Pellet bus: `gtceu:mv_input_bus_2` (cfg; confirm in-world name)
 - Default **manual**; Th/U **auto**. Dump `fission_state.txt` overrides modes.
+- Pellet items: `tfg:terrafirmaguard_pa6` (heat_per_tick 40, ~30s) and `tfg:refrigerant_pellet` (heat 5, ~10s). Count both; cfg may list several `pellet |` lines.
+- Count pellets on `pellet_bus` **and** AE interface **local buffer** (stored slots). Do not use an ME Bridge / full-network peripheral for counting.
 
 ### Fuel lifetime (default ReactorCurve)
 
