@@ -15,4 +15,4 @@ Every project/script gets a written spec (prefer `.cursor/rules/<project>.mdc`, 
 
 ## Spec content (after confirmation)
 
-Keep short: layout, behaviour, deploy (`bundle_project.py` + cfg), non-goals. Update the matching rule when behaviour changes.
+Keep short: layout, behaviour, deploy (`python tools/bundle_project.py <project> [entry]` → `dist/`), non-goals. New scripts follow `projects/` conventions (no bundler table edits). Update the matching rule when behaviour changes.

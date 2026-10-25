@@ -18,6 +18,7 @@ def load_bundler():
     spec = importlib.util.spec_from_file_location("bundle_project", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -27,12 +28,31 @@ def bundler():
     return load_bundler()
 
 
-def test_topo_modules_resolves_shared(bundler, tmp_path):
-    # Use real craft_ui entry graph lightly via collect on ae2_feed main
+def test_discover_single_and_multi(bundler):
+    single = bundler.discover_entries("ae2_feed")
+    assert len(single) == 1
+    assert single[0].module == "main"
+    assert single[0].dist_name == "ae2_feed"
+
+    multi = bundler.discover_entries("craft")
+    names = {e.module for e in multi}
+    assert names == {
+        "craft_ui",
+        "greenhouse_clean",
+        "wheat_grain",
+        "pizza_maintain",
+    }
+    assert all(e.path.parent.name == "entries" for e in multi)
+
+
+def test_topo_modules_resolves_shared(bundler):
     entry = "main"
-    src = (REPO / "ae2_feed" / "main.lua").read_text(encoding="utf-8")
+    src = (REPO / "projects" / "ae2_feed" / "main.lua").read_text(encoding="utf-8")
     modules = bundler.topo_modules(
-        entry, src, REPO / "ae2_feed", REPO / "shared"
+        entry,
+        src,
+        REPO / "projects" / "ae2_feed",
+        REPO / "projects" / "shared",
     )
     assert "config" in modules
     assert "discover" in modules
@@ -40,8 +60,7 @@ def test_topo_modules_resolves_shared(bundler, tmp_path):
     assert "transfer" in modules  # via move
 
 
-def test_bundle_power_writes_lua_and_cfg(bundler, tmp_path, monkeypatch):
-    # Run bundler.main into real dist/ (repo) — assert artifacts
+def test_bundle_power_writes_lua_and_cfg(bundler):
     dist = REPO / "dist"
     rc = bundler.main(["power"])
     assert rc == 0
@@ -50,7 +69,7 @@ def test_bundle_power_writes_lua_and_cfg(bundler, tmp_path, monkeypatch):
     text = (dist / "power.lua").read_text(encoding="utf-8")
     assert 'package.preload["config"]' in text
     assert 'package.preload["gas_turbine"]' in text
-    assert "Bundled from power/main.lua" in text
+    assert "projects/power/main.lua" in text
 
 
 def test_bundle_craft_merges_cfg(bundler):
@@ -62,6 +81,7 @@ def test_bundle_craft_merges_cfg(bundler):
     assert "main |" in cfg or "main|" in cfg.replace(" ", "")
     lua = (REPO / "dist" / "pizza_maintain.lua").read_text(encoding="utf-8")
     assert 'package.preload["craft"]' in lua or "craft.request" in lua
+    assert "projects/craft/entries/pizza_maintain.lua" in lua
 
 
 def test_bundle_crystals_copies_cfg(bundler):
@@ -78,8 +98,15 @@ def test_bundle_ebf_copies_cfg(bundler):
     assert (REPO / "dist" / "ebf.cfg").is_file()
     text = (REPO / "dist" / "ebf.lua").read_text(encoding="utf-8")
     assert 'package.preload["furnace"]' in text
-    assert "Bundled from ebf/main.lua" in text
+    assert "projects/ebf/main.lua" in text
 
+
+def test_bundle_ae_stats_copies_labels(bundler):
+    rc = bundler.main(["ae_stats", "display"])
+    assert rc == 0
+    assert (REPO / "dist" / "display.lua").is_file()
+    assert (REPO / "dist" / "display.cfg").is_file()
+    assert (REPO / "dist" / "labels.cfg").is_file()
 
 
 def test_circular_require_detected(bundler, tmp_path):

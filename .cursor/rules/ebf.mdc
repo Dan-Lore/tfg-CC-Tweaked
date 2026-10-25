@@ -1,7 +1,7 @@
 ---
 description: Electric blast furnace recipe feeder (ebf/)
 globs:
-  - ebf/**
+  - projects/ebf/**
 ---
 
 # ebf
@@ -42,4 +42,4 @@ CC: Tweaked script for TerraFirmaGreg. Feeds atomic recipes from HV buffers into
 python tools/bundle_project.py ebf
 ```
 
-Copy **both** `dist/ebf.lua` and `ebf.cfg` onto the computer.
+Copy **both** `dist/ebf.lua` and `dist/ebf.cfg` onto the computer.

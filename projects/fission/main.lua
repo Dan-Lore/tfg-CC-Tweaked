@@ -4,7 +4,7 @@
 -- Runtime: fission_state.txt (modes / one-cycle; overrides cfg)
 
 package.path = package.path
-    .. ";/fission/?.lua;fission/?.lua;/shared/?.lua;shared/?.lua"
+    .. ";/projects/fission/?.lua;projects/fission/?.lua;/projects/shared/?.lua;projects/shared/?.lua"
 
 local configMod = require("config")
 local fuels = require("fuels")

@@ -1,10 +1,8 @@
 -- Bootstrap CC stubs + package.path for unit tests.
 -- Usage from a test file:
 --   local load_tests = loadfile("tests/loader.lua")
---   local T = load_tests({ projects = { "craft", "shared", "ae_stats" } })
+--   local T = load_tests({ projects = { "craft", "ae_stats" } })
 
-local ROOT = (arg and arg[0] and arg[0]:match("(.*/)")) or "./"
--- Prefer CWD-based absolute-ish paths via debug
 local function repoRoot()
     local src = debug.getinfo(1, "S").source
     if src:sub(1, 1) == "@" then
@@ -20,18 +18,23 @@ end
 return function(opts)
     opts = opts or {}
     local root = opts.root or repoRoot()
-    package.path = table.concat({
+    local parts = {
         root .. "/tests/?.lua",
-        root .. "/shared/?.lua",
-        root .. "/craft/?.lua",
-        root .. "/ae_stats/?.lua",
-        root .. "/power/?.lua",
-        root .. "/ae2_feed/?.lua",
-        root .. "/crystals/?.lua",
-        root .. "/distill/?.lua",
-        root .. "/ebf/?.lua",
-        package.path,
-    }, ";")
+        root .. "/projects/shared/?.lua",
+    }
+    local projList = opts.projects or {
+        "craft", "shared", "ae_stats", "power", "ae2_feed",
+        "crystals", "distill", "ebf", "fission", "railgun",
+    }
+    for i = 1, #projList do
+        local name = projList[i]
+        if name ~= "shared" then
+            parts[#parts + 1] = root .. "/projects/" .. name .. "/?.lua"
+            parts[#parts + 1] = root .. "/projects/" .. name .. "/entries/?.lua"
+        end
+    end
+    parts[#parts + 1] = package.path
+    package.path = table.concat(parts, ";")
 
     -- Clear cached project modules so each test file starts clean.
     local purge = {

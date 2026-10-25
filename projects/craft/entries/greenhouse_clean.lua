@@ -6,7 +6,7 @@
 -- Deploy:  dist/greenhouse_clean.lua + greenhouse_clean.cfg
 
 package.path = package.path
-    .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"
+    .. ";/projects/shared/?.lua;projects/shared/?.lua;/projects/craft/?.lua;projects/craft/?.lua"
 
 require("food")
 local transfer = require("transfer")

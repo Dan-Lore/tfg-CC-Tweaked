@@ -5,7 +5,7 @@
 -- Deploy:  dist/railgun.lua + railgun.cfg  (startup: shell.run("railgun"))
 
 package.path = package.path
-    .. ";/railgun/?.lua;railgun/?.lua;/shared/?.lua;shared/?.lua"
+    .. ";/projects/railgun/?.lua;projects/railgun/?.lua;/projects/shared/?.lua;projects/shared/?.lua"
 
 local configMod = require("config")
 local discover = require("discover")

@@ -6,7 +6,7 @@
 --   gas_turbine.lua, combustion_engine.lua (+ machine_common.lua)
 
 package.path = package.path
-    .. ";/power/?.lua;power/?.lua;/shared/?.lua;shared/?.lua"
+    .. ";/projects/power/?.lua;projects/power/?.lua;/projects/shared/?.lua;projects/shared/?.lua"
 
 local configMod = require("config")
 local gasTurbine = require("gas_turbine")

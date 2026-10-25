@@ -8,8 +8,8 @@ local stub = T.stub
 do
     local root = T.root
     package.path = table.concat({
-        root .. "/ebf/?.lua",
-        root .. "/shared/?.lua",
+        root .. "/projects/ebf/?.lua",
+        root .. "/projects/shared/?.lua",
         root .. "/tests/?.lua",
         package.path,
     }, ";")

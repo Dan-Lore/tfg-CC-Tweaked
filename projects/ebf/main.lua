@@ -9,7 +9,7 @@
 -- Deploy:  dist/ebf.lua + ebf.cfg
 
 package.path = package.path
-    .. ";/ebf/?.lua;ebf/?.lua;/shared/?.lua;shared/?.lua"
+    .. ";/projects/ebf/?.lua;projects/ebf/?.lua;/projects/shared/?.lua;projects/shared/?.lua"
 
 local configMod = require("config")
 local discover = require("discover")

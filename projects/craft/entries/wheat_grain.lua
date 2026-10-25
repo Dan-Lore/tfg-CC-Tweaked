@@ -12,7 +12,7 @@
 -- Deploy:  dist/wheat_grain.lua + wheat_grain.cfg
 
 package.path = package.path
-    .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"
+    .. ";/projects/shared/?.lua;projects/shared/?.lua;/projects/craft/?.lua;projects/craft/?.lua"
 
 local craft = require("craft")
 local storage = require("storage")

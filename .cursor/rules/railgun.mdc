@@ -1,6 +1,6 @@
 ---
 description: Interplanetary railgun — wait for full loaders, settle, pulse relay
-globs: railgun/**
+globs: projects/railgun/**
 ---
 
 # railgun
@@ -20,7 +20,7 @@ Dedicated CC computer: watch one Interplanetary Railgun **Sender**’s HV input 
 2. Require **all** discovered loaders full and count ≥ `expected` (wait if fewer).
 3. **Settle** (`settle | 15`): after first all-full, keep watching; if any slot frees, restart settle. Only then pulse.
 4. **Pulse** (`pulse`, several seconds) on `relay_side` (`back`), then **cooldown** (`cooldown | 120`).
-5. Hotplug rescan via `shared/net_watch`.
+5. Hotplug rescan via `projects/shared/net_watch`.
 
 ## Non-goals / TODO
 
@@ -33,4 +33,4 @@ Dedicated CC computer: watch one Interplanetary Railgun **Sender**’s HV input 
 python tools/bundle_project.py railgun
 ```
 
-Copy **both** `dist/railgun.lua` and `railgun.cfg` onto the computer.
+Copy **both** `dist/railgun.lua` and `dist/railgun.cfg` onto the computer.

@@ -114,7 +114,8 @@ local function trySectioned(path, section)
 end
 
 --- Config lines for a logical section.
--- Order: explicit path → <program>.cfg [section] → craft.cfg [section] → fallbackName.
+-- Order: explicit path → <program>.cfg [section] → craft.cfg [section]
+-- → fallbackName → cfg/fallbackName → ../cfg/fallbackName (entries/ layout).
 -- Returns lines, label (for errors).
 function util.openConfigLines(explicitPath, section, fallbackName)
     if explicitPath then
@@ -139,21 +140,33 @@ function util.openConfigLines(explicitPath, section, fallbackName)
         return lines, label
     end
 
-    local path = util.resolvePath(nil, fallbackName)
-    local text = util.readAll(path)
-    if not text then
-        local hint = stem and (stem .. ".cfg") or "program.cfg"
-        error(
-            "Cannot open " .. path
-                .. " (deploy "
-                .. hint
-                .. " next to the program, or "
-                .. tostring(fallbackName)
-                .. ")",
-            2
-        )
+    local candidates = { fallbackName }
+    if fallbackName then
+        candidates[#candidates + 1] = "cfg/" .. fallbackName
+        candidates[#candidates + 1] = "../cfg/" .. fallbackName
     end
-    return linesFromText(text), path
+    local lastPath = nil
+    for i = 1, #candidates do
+        local path = util.resolvePath(nil, candidates[i])
+        lastPath = path
+        local text = util.readAll(path)
+        if text then
+            return linesFromText(text), path
+        end
+    end
+
+    local hint = stem and (stem .. ".cfg") or "program.cfg"
+    error(
+        "Cannot open " .. tostring(lastPath or fallbackName)
+            .. " (deploy "
+            .. hint
+            .. " next to the program, or "
+            .. tostring(fallbackName)
+            .. " / cfg/"
+            .. tostring(fallbackName)
+            .. ")",
+        2
+    )
 end
 
 --- Short display name: last path segment after `/`.

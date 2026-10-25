@@ -13,7 +13,7 @@
 -- Deploy:  dist/pizza_maintain.lua + pizza_maintain.cfg
 
 package.path = package.path
-    .. ";/shared/?.lua;shared/?.lua;/craft/?.lua;craft/?.lua"
+    .. ";/projects/shared/?.lua;projects/shared/?.lua;/projects/craft/?.lua;projects/craft/?.lua"
 
 local craft = require("craft")
 local storage = require("storage")

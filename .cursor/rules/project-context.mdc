@@ -22,7 +22,7 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - Keep craft/transfer helpers inventory-agnostic: callers pass peripheral names (`from` / `out` / `machine`), never hard-code specific storage blocks
 - Greenhouse control lives in `greenhouse.lua`; machines stay **disabled by default**
 - Grow craft: `Greenhouse.pulse` (~3s on, then off) — one recipe finishes after the pulse; then poll `mv_output_bus_N`
-- Repo keeps `recipes.cfg` + `storage.cfg`; deploy is `<entry>.lua` + `<entry>.cfg` (bundler merges both into matching basename with `[storage]` / `[recipes]`). Local unbundled runs still accept the two separate files.
+- Lua lives under `projects/<name>/` (+ `projects/shared/`). Single-entry: `main.lua` + `<name>.cfg`. Multi-entry: `entries/*.lua`; craft fragments in `cfg/` (bundler merges to `dist/<entry>.cfg` with `[storage]` / `[recipes]`). Deploy via `python tools/bundle_project.py <project> [entry]` (or `--all`).
 - `greenhouse_clean.lua` is autonomous — any computer with configs + peripheral network; not tied to `craft_ui`; keeps GH off and only empties buses
 - Food always goes to `main` fridge (`tfg:ev_food_refrigerator_0`); never spill perishables into the bronze overflow crate. Only non-perishables (e.g. `firmalife:spice/basil_leaves`) use `route` → `overflow`; `greenhouse_clean` drains stray food from overflow back to fridge
 - Greenhouse products are pulled from `output_bus_prefix` + circuit (default `gtceu:mv_output_bus_N`), not from the greenhouse controller block
@@ -31,4 +31,4 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - `pizza_maintain.lua` keeps `firmalife:food/cooked_pizza` at `pizza_target` (default 16) via `craft.request`; `pizza_interval` between polls; run `bg pizza_maintain.lua`
 - `machine_lock` is **in-process only** (one CC computer). `pizza_maintain` / `greenhouse_clean` / `craft_ui` / `wheat_grain` on different computers do not share locks
 - Each project’s `config.lua` is **project-local**; deploy one bundled entry per computer (do not mix multiple project `config` modules on one machine)
-- Shared helpers: `shared/cfg_pipe.lua` (pipe cfg load), `shared/net_watch.lua` (hotplug/sleep), `craft/food.lua` (tag/spoil registration into `transfer`)
+- Shared helpers: `projects/shared/cfg_pipe.lua` (pipe cfg load), `projects/shared/net_watch.lua` (hotplug/sleep), `projects/craft/food.lua` (tag/spoil registration into `transfer`)

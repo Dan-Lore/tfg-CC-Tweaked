@@ -4,7 +4,7 @@
 -- Deploy:  dist/distill.lua + distill.cfg
 
 package.path = package.path
-    .. ";/distill/?.lua;distill/?.lua;/shared/?.lua;shared/?.lua"
+    .. ";/projects/distill/?.lua;projects/distill/?.lua;/projects/shared/?.lua;projects/shared/?.lua"
 
 local configMod = require("config")
 local towerMod = require("tower")

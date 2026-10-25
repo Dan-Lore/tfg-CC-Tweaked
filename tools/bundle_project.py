@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """Bundle a CC: Tweaked project entry into one Lua file (package.preload + entry).
 
+Layout conventions (under projects/):
+
+  Single-entry project:
+    projects/<name>/main.lua
+    projects/<name>/<name>.cfg          # optional → dist/<name>.cfg
+
+  Multi-entry project:
+    projects/<name>/entries/<entry>.lua
+    projects/<name>/<entry>.cfg         # optional → dist/<entry>.cfg
+    projects/<name>/cfg/*.cfg           # optional fragments → merged dist/<entry>.cfg
+    other root *.cfg referenced in the entry source are copied alongside
+
+  Shared modules: projects/shared/
+
 Usage:
   python tools/bundle_project.py ae2_feed
-  python tools/bundle_project.py crystals
-  python tools/bundle_project.py power
-  python tools/bundle_project.py distill
-  python tools/bundle_project.py ebf
-  python tools/bundle_project.py railgun
-  python tools/bundle_project.py fission
-  python tools/bundle_project.py ae_stats sampler
   python tools/bundle_project.py ae_stats display
-  python tools/bundle_project.py ae_stats graphview
   python tools/bundle_project.py craft craft_ui
-  python tools/bundle_project.py craft greenhouse_clean
-  python tools/bundle_project.py craft wheat_grain
-  python tools/bundle_project.py craft pizza_maintain
-
-Resolves require("name") from <project>/ then shared/. Writes dist/<entry>.lua.
-COPY_CFG copies a single .cfg next to the bundle.
-COPY_CFG_BY_ENTRY copies <entry>.cfg for multi-entry projects.
-MERGE_CFG merges several source .cfg files into dist/<entry>.cfg
-(e.g. craft pizza_maintain → pizza_maintain.lua + pizza_maintain.cfg).
+  python tools/bundle_project.py --all
 """
 
 from __future__ import annotations
@@ -30,91 +28,21 @@ import argparse
 import re
 import shutil
 import sys
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PROJECTS_ROOT = REPO_ROOT / "projects"
+SHARED_DIR = PROJECTS_ROOT / "shared"
+
 REQUIRE_RE = re.compile(r"""require\s*\(\s*['"]([A-Za-z0-9_./-]+)['"]\s*\)""")
 PACKAGE_PATH_RE = re.compile(
     r"^package\.path\s*=\s*package\.path(?:\s*\n\s*\.\.[^\n]*)*\s*(?:\n|$)",
     re.MULTILINE,
 )
 
-# Lazy requires that static scan of the entry may miss (nested in functions).
-EXTRA_REQUIRES: dict[str, tuple[str, ...]] = {
-    "craft": ("storage", "food"),
-    "greenhouse_clean": ("greenhouse", "food"),
-    "craft_io": ("food",),
-    "craft_stock": ("food",),
-    "craft_grow": ("food",),
-    "pizza_maintain": ("food",),
-    "wheat_grain": ("food",),
-}
-
-CRAFT_CFG_HINT = (
-    "-- Also copy the matching .cfg next to this file "
-    "(same basename; sections [storage] and [recipes])."
-)
-AE2_FEED_CFG_HINT = (
-    "-- Also copy ae2_feed.cfg next to this file on the computer."
-)
-CRYSTALS_CFG_HINT = (
-    "-- Also copy crystals.cfg next to this file on the computer."
-)
-POWER_CFG_HINT = (
-    "-- Also copy power.cfg next to this file on the computer."
-)
-DISTILL_CFG_HINT = (
-    "-- Also copy distill.cfg next to this file on the computer."
-)
-EBF_CFG_HINT = (
-    "-- Also copy ebf.cfg next to this file on the computer."
-)
-RAILGUN_CFG_HINT = (
-    "-- Also copy railgun.cfg next to this file on the computer."
-)
-FISSION_CFG_HINT = (
-    "-- Also copy fission.cfg next to this file on the computer."
-)
-AE_STATS_CFG_HINT = (
-    "-- Also copy the matching .cfg next to this file "
-    "(sampler.cfg / display.cfg / graphview.cfg; "
-    "display+graphview also need labels.cfg)."
-)
-
-# Copy <project>/<name>.cfg next to the bundle in dist/.
-COPY_CFG: dict[str, str] = {
-    "crystals": "crystals.cfg",
-    "ae2_feed": "ae2_feed.cfg",
-    "power": "power.cfg",
-    "distill": "distill.cfg",
-    "ebf": "ebf.cfg",
-    "railgun": "railgun.cfg",
-    "fission": "fission.cfg",
-}
-
-# project -> entry -> cfg filename (copied to dist/<cfg>).
-COPY_CFG_BY_ENTRY: dict[str, dict[str, str]] = {
-    "ae_stats": {
-        "sampler": "sampler.cfg",
-        "display": "display.cfg",
-        "graphview": "graphview.cfg",
-    },
-}
-
-# Extra files copied alongside an entry bundle (e.g. labels.cfg).
-EXTRA_COPY_BY_ENTRY: dict[str, dict[str, tuple[str, ...]]] = {
-    "ae_stats": {
-        "display": ("labels.cfg",),
-        "graphview": ("labels.cfg",),
-    },
-}
-
-# Merge several source cfgs into one sectioned dist file named like the entry.
-# project -> (src_cfg, ...)  → dist/<entry>.cfg with [stem] sections.
-MERGE_CFG: dict[str, tuple[str, ...]] = {
-    "craft": ("storage.cfg", "recipes.cfg"),
-}
+# module = require/topo name; dist_name = dist/<dist_name>.lua; path = entry file
+Entry = namedtuple("Entry", ("module", "dist_name", "path"))
 
 
 def read_text(path: Path) -> str:
@@ -123,6 +51,57 @@ def read_text(path: Path) -> str:
 
 def strip_package_path(src: str) -> str:
     return PACKAGE_PATH_RE.sub("", src, count=1).lstrip("\n")
+
+
+def list_projects() -> list[str]:
+    if not PROJECTS_ROOT.is_dir():
+        return []
+    names: list[str] = []
+    for path in sorted(PROJECTS_ROOT.iterdir()):
+        if path.is_dir() and path.name != "shared" and not path.name.startswith("."):
+            names.append(path.name)
+    return names
+
+
+def discover_entries(project: str) -> list[Entry]:
+    project_dir = PROJECTS_ROOT / project
+    if not project_dir.is_dir():
+        raise SystemExit(f"project directory not found: {project_dir}")
+
+    entries_dir = project_dir / "entries"
+    if entries_dir.is_dir():
+        found = sorted(entries_dir.glob("*.lua"))
+        if not found:
+            raise SystemExit(f"no entries/*.lua in {entries_dir}")
+        return [
+            Entry(module=p.stem, dist_name=p.stem, path=p) for p in found
+        ]
+
+    main_path = project_dir / "main.lua"
+    if main_path.is_file():
+        return [Entry(module="main", dist_name=project, path=main_path)]
+
+    raise SystemExit(
+        f"{project}: need main.lua or entries/*.lua under {project_dir}"
+    )
+
+
+def resolve_entry(project: str, entry_arg: str | None) -> Entry:
+    entries = discover_entries(project)
+    if entry_arg:
+        for ent in entries:
+            if ent.module == entry_arg or ent.dist_name == entry_arg:
+                return ent
+        names = ", ".join(e.module for e in entries)
+        raise SystemExit(
+            f"entry {entry_arg!r} not found in {project}; available: {names}"
+        )
+    if len(entries) == 1:
+        return entries[0]
+    names = ", ".join(e.module for e in entries)
+    raise SystemExit(
+        f"multiple entries in {project}; pass one of: {names}"
+    )
 
 
 def find_module(name: str, project_dir: Path, shared_dir: Path) -> Path | None:
@@ -161,14 +140,10 @@ def topo_modules(
         src = from_src if from_src is not None else read_text(path)
         for dep in collect_requires(src):
             visit(dep)
-        for dep in EXTRA_REQUIRES.get(name, ()):
-            visit(dep)
         visiting.remove(name)
         ordered[name] = path
 
     for dep in collect_requires(entry_src):
-        visit(dep)
-    for dep in EXTRA_REQUIRES.get(entry_name, ()):
         visit(dep)
 
     return ordered
@@ -181,32 +156,31 @@ def wrap_preload(name: str, src: str) -> str:
     return "".join(parts)
 
 
+def cfg_hint(copied: list[str]) -> str:
+    if not copied:
+        return ""
+    if len(copied) == 1:
+        return f"-- Also copy {copied[0]} next to this file on the computer.\n"
+    joined = ", ".join(copied)
+    return f"-- Also copy these next to this file on the computer: {joined}.\n"
+
+
 def build_bundle(
     project: str,
-    entry: str,
+    entry: Entry,
     modules: OrderedDict[str, Path],
     entry_src: str,
+    copied_cfg: list[str],
 ) -> str:
     parts: list[str] = []
-    parts.append(f"-- Bundled from {project}/{entry}.lua — do not edit by hand; rebuild with tools/bundle_project.py\n")
-    if project == "craft":
-        parts.append(CRAFT_CFG_HINT + "\n")
-    elif project == "ae2_feed":
-        parts.append(AE2_FEED_CFG_HINT + "\n")
-    elif project == "crystals":
-        parts.append(CRYSTALS_CFG_HINT + "\n")
-    elif project == "power":
-        parts.append(POWER_CFG_HINT + "\n")
-    elif project == "distill":
-        parts.append(DISTILL_CFG_HINT + "\n")
-    elif project == "ebf":
-        parts.append(EBF_CFG_HINT + "\n")
-    elif project == "railgun":
-        parts.append(RAILGUN_CFG_HINT + "\n")
-    elif project == "fission":
-        parts.append(FISSION_CFG_HINT + "\n")
-    elif project == "ae_stats":
-        parts.append(AE_STATS_CFG_HINT + "\n")
+    rel_entry = entry.path.relative_to(REPO_ROOT).as_posix()
+    parts.append(
+        f"-- Bundled from {rel_entry} — do not edit by hand; "
+        f"rebuild with tools/bundle_project.py\n"
+    )
+    hint = cfg_hint(copied_cfg)
+    if hint:
+        parts.append(hint)
     parts.append("-- Generated package.preload modules + entrypoint.\n\n")
 
     for name, path in modules.items():
@@ -216,15 +190,14 @@ def build_bundle(
         parts.append("\n")
 
     entry_body = strip_package_path(entry_src)
-    parts.append(f"-- entry: {project}/{entry}.lua\n")
+    parts.append(f"-- entry: {rel_entry}\n")
     parts.append(entry_body.rstrip() + "\n")
     return "".join(parts)
 
 
 def write_merged_cfg(
-    project_dir: Path,
     out_path: Path,
-    sources: tuple[str, ...],
+    sources: list[Path],
     paired_lua: str,
 ) -> None:
     parts: list[str] = []
@@ -232,11 +205,8 @@ def write_merged_cfg(
         f"# Config for {paired_lua} (keep the same basename on the computer).\n"
         "# Sections match source files in the repo. Edit either section in-game.\n\n"
     )
-    for src_name in sources:
-        src_path = project_dir / src_name
-        if not src_path.is_file():
-            raise SystemExit(f"merge cfg source missing: {src_path}")
-        section = Path(src_name).stem
+    for src_path in sources:
+        section = src_path.stem
         body = read_text(src_path).replace("\r\n", "\n").replace("\r", "\n").rstrip()
         parts.append(f"[{section}]\n")
         parts.append(body)
@@ -244,97 +214,121 @@ def write_merged_cfg(
     out_path.write_text("".join(parts), encoding="utf-8", newline="\n")
 
 
-def resolve_entry(project: str, entry_arg: str | None) -> tuple[str, Path]:
-    project_dir = REPO_ROOT / project
-    if not project_dir.is_dir():
-        raise SystemExit(f"project directory not found: {project_dir}")
+def fragment_cfgs(project_dir: Path) -> list[Path]:
+    cfg_dir = project_dir / "cfg"
+    if not cfg_dir.is_dir():
+        return []
+    return sorted(p for p in cfg_dir.glob("*.cfg") if p.is_file())
 
-    if entry_arg:
-        entry = entry_arg
-    elif (project_dir / "main.lua").is_file():
-        entry = "main"
-    else:
-        raise SystemExit(
-            f"no entry given and {project}/main.lua missing; "
-            f"usage: bundle_project.py {project} <entry>"
+
+def entry_names_set(project: str) -> set[str]:
+    return {e.dist_name for e in discover_entries(project)}
+
+
+def deploy_cfgs(
+    project: str,
+    entry: Entry,
+    entry_src: str,
+    out_dir: Path,
+) -> list[str]:
+    """Copy/merge cfg files into dist/. Returns basenames written."""
+    project_dir = PROJECTS_ROOT / project
+    written: list[str] = []
+    fragments = fragment_cfgs(project_dir)
+
+    if fragments:
+        dst = out_dir / f"{entry.dist_name}.cfg"
+        write_merged_cfg(dst, fragments, f"{entry.dist_name}.lua")
+        written.append(dst.name)
+        print(
+            f"  merged config: {dst.relative_to(REPO_ROOT).as_posix()} "
+            f"<- {', '.join(p.name for p in fragments)}"
         )
-
-    entry_path = project_dir / f"{entry}.lua"
-    if not entry_path.is_file():
-        raise SystemExit(f"entry not found: {entry_path}")
-    return entry, entry_path
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("project", help="project folder name (ae2_feed, craft, ...)")
-    parser.add_argument(
-        "entry",
-        nargs="?",
-        default=None,
-        help="entry module name without .lua (default: main)",
-    )
-    args = parser.parse_args(argv)
-
-    project = args.project
-    entry, entry_path = resolve_entry(project, args.entry)
-    project_dir = REPO_ROOT / project
-    shared_dir = REPO_ROOT / "shared"
-
-    entry_src = read_text(entry_path)
-    modules = topo_modules(entry, entry_src, project_dir, shared_dir)
-
-    bundle = build_bundle(project, entry, modules, entry_src)
-
-    if project == "ae2_feed" and entry == "main":
-        out_name = "ae2_feed"
-    elif project == "crystals" and entry == "main":
-        out_name = "crystals"
-    elif project == "power" and entry == "main":
-        out_name = "power"
-    elif project == "distill" and entry == "main":
-        out_name = "distill"
-    elif project == "ebf" and entry == "main":
-        out_name = "ebf"
-    elif project == "railgun" and entry == "main":
-        out_name = "railgun"
-    elif project == "fission" and entry == "main":
-        out_name = "fission"
     else:
-        out_name = entry
+        stem_cfg = project_dir / f"{entry.dist_name}.cfg"
+        if stem_cfg.is_file():
+            dst = out_dir / stem_cfg.name
+            shutil.copyfile(stem_cfg, dst)
+            written.append(dst.name)
+            print(f"  copied config: {dst.relative_to(REPO_ROOT).as_posix()}")
+
+    names = entry_names_set(project)
+    for cfg_path in sorted(project_dir.glob("*.cfg")):
+        if cfg_path.stem in names:
+            continue
+        if cfg_path.name in written:
+            continue
+        if cfg_path.name not in entry_src:
+            continue
+        dst = out_dir / cfg_path.name
+        shutil.copyfile(cfg_path, dst)
+        if cfg_path.name not in written:
+            written.append(cfg_path.name)
+        print(f"  copied extra: {dst.relative_to(REPO_ROOT).as_posix()}")
+
+    return written
+
+
+def bundle_one(project: str, entry: Entry) -> Path:
+    project_dir = PROJECTS_ROOT / project
+    entry_src = read_text(entry.path)
+    modules = topo_modules(entry.module, entry_src, project_dir, SHARED_DIR)
+
     out_dir = REPO_ROOT / "dist"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{out_name}.lua"
+
+    copied = deploy_cfgs(project, entry, entry_src, out_dir)
+    bundle = build_bundle(project, entry, modules, entry_src, copied)
+
+    out_path = out_dir / f"{entry.dist_name}.lua"
     out_path.write_text(bundle, encoding="utf-8", newline="\n")
 
     mod_list = ", ".join(modules.keys()) or "(none)"
     print(f"Wrote {out_path.relative_to(REPO_ROOT).as_posix()}")
     print(f"  modules: {mod_list}")
+    return out_path
 
-    sources = MERGE_CFG.get(project)
-    if sources:
-        dst_cfg = out_dir / f"{out_name}.cfg"
-        write_merged_cfg(project_dir, dst_cfg, sources, f"{out_name}.lua")
-        print(
-            f"  merged config: {dst_cfg.relative_to(REPO_ROOT).as_posix()} "
-            f"<- {', '.join(sources)}"
-        )
-    else:
-        entry_map = COPY_CFG_BY_ENTRY.get(project) or {}
-        copy_name = entry_map.get(entry) or COPY_CFG.get(project)
-        if copy_name:
-            src_cfg = project_dir / copy_name
-            if src_cfg.is_file():
-                dst_cfg = out_dir / copy_name
-                shutil.copyfile(src_cfg, dst_cfg)
-                print(f"  copied config: {dst_cfg.relative_to(REPO_ROOT).as_posix()}")
-        extra = (EXTRA_COPY_BY_ENTRY.get(project) or {}).get(entry) or ()
-        for extra_name in extra:
-            src_extra = project_dir / extra_name
-            if src_extra.is_file():
-                dst_extra = out_dir / extra_name
-                shutil.copyfile(src_extra, dst_extra)
-                print(f"  copied extra: {dst_extra.relative_to(REPO_ROOT).as_posix()}")
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "project",
+        nargs="?",
+        help="project folder under projects/ (ae2_feed, craft, …)",
+    )
+    parser.add_argument(
+        "entry",
+        nargs="?",
+        default=None,
+        help="entry module (required when project has entries/)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="bundle every entry of every project",
+    )
+    args = parser.parse_args(argv)
+
+    if args.all:
+        if args.project or args.entry:
+            raise SystemExit("--all does not take project/entry arguments")
+        projects = list_projects()
+        if not projects:
+            raise SystemExit(f"no projects under {PROJECTS_ROOT}")
+        for project in projects:
+            for ent in discover_entries(project):
+                print(f"=== {project}/{ent.module} ===")
+                bundle_one(project, ent)
+        return 0
+
+    if not args.project:
+        parser.error("project name required (or pass --all)")
+
+    entry = resolve_entry(args.project, args.entry)
+    bundle_one(args.project, entry)
     return 0
 
 

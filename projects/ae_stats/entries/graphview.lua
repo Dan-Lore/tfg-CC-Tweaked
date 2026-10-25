@@ -5,7 +5,7 @@
 -- Deploy:  dist/graphview.lua + graphview.cfg + labels.cfg
 
 package.path = package.path
-    .. ";/shared/?.lua;shared/?.lua;/ae_stats/?.lua;ae_stats/?.lua"
+    .. ";/projects/shared/?.lua;projects/shared/?.lua;/projects/ae_stats/?.lua;projects/ae_stats/?.lua"
 
 local util = require("util")
 local protocol = require("protocol")

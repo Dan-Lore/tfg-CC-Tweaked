@@ -1,6 +1,6 @@
 ---
 description: Dea's Fission — multi-reactor fuel maintain, auto/manual, pellet-cooled Pu
-globs: fission/**
+globs: projects/fission/**
 ---
 
 # fission
@@ -33,4 +33,4 @@ One CC computer maintains Dea's Fission (`deafission`) reactors in TFG: feed all
 python tools/bundle_project.py fission
 ```
 
-Copy `dist/fission.lua` + `fission.cfg`. Runtime creates/updates `fission_state.txt` on the computer.
+Copy `dist/fission.lua` + `dist/fission.cfg`. Runtime creates/updates `fission_state.txt` on the computer.

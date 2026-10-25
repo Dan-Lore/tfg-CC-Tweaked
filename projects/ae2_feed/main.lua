@@ -4,7 +4,7 @@
 -- Deploy:  dist/ae2_feed.lua + ae2_feed.cfg  (startup: shell.run("ae2_feed"))
 
 package.path = package.path
-    .. ";/ae2_feed/?.lua;ae2_feed/?.lua;/shared/?.lua;shared/?.lua"
+    .. ";/projects/ae2_feed/?.lua;projects/ae2_feed/?.lua;/projects/shared/?.lua;projects/shared/?.lua"
 
 local configMod = require("config")
 local discover = require("discover")

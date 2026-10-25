@@ -76,8 +76,8 @@ A.suite("recipes", {
         fn = function()
             T.stub.setRunningProgram("/craft/program.lua")
             -- map real file into stub fs via reading from disk
-            local f = io.open(T.root .. "/craft/recipes.cfg", "r")
-            A.truthy(f, "open craft/recipes.cfg")
+            local f = io.open(T.root .. "/projects/craft/cfg/recipes.cfg", "r")
+            A.truthy(f, "open projects/craft/cfg/recipes.cfg")
             local text = f:read("*a")
             f:close()
             T.stub.writeFile("/craft/recipes.cfg", text)

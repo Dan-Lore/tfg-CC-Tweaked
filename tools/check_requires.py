@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify each project entry resolves require() only from its dir + shared/."""
+"""Verify each project entry resolves require() only from its dir + projects/shared."""
 
 from __future__ import annotations
 
@@ -9,69 +9,65 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-ENTRIES: list[tuple[str, str]] = [
-    ("ae2_feed", "main"),
-    ("crystals", "main"),
-    ("power", "main"),
-    ("distill", "main"),
-    ("ebf", "main"),
-    ("ae_stats", "sampler"),
-    ("ae_stats", "display"),
-    ("ae_stats", "graphview"),
-    ("craft", "craft_ui"),
-    ("craft", "greenhouse_clean"),
-    ("craft", "wheat_grain"),
-    ("craft", "pizza_maintain"),
-]
-
 
 def load_bundler():
     path = REPO_ROOT / "tools" / "bundle_project.py"
     spec = importlib.util.spec_from_file_location("bundle_project", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
 def main() -> int:
     bundler = load_bundler()
-    shared = REPO_ROOT / "shared"
+    shared = bundler.SHARED_DIR
     failed = 0
-    for project, entry in ENTRIES:
-        project_dir = REPO_ROOT / project
-        entry_path = project_dir / f"{entry}.lua"
-        if not entry_path.is_file():
-            print(f"MISSING entry: {entry_path}")
-            failed += 1
-            continue
+    projects = bundler.list_projects()
+    if not projects:
+        print(f"No projects under {bundler.PROJECTS_ROOT}")
+        return 1
+
+    for project in projects:
+        project_dir = bundler.PROJECTS_ROOT / project
         try:
-            modules = bundler.topo_modules(
-                entry,
-                bundler.read_text(entry_path),
-                project_dir,
-                shared,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"FAIL {project}/{entry}: {exc}")
+            entries = bundler.discover_entries(project)
+        except SystemExit as exc:
+            print(f"FAIL {project}: {exc}")
             failed += 1
             continue
-        for name, path in modules.items():
-            rel = path.resolve()
+        for ent in entries:
             try:
-                rel.relative_to(project_dir.resolve())
-                in_proj = True
-            except ValueError:
-                in_proj = False
-            try:
-                rel.relative_to(shared.resolve())
-                in_shared = True
-            except ValueError:
-                in_shared = False
-            if not (in_proj or in_shared):
-                print(f"FAIL {project}/{entry}: module {name} outside project/shared: {path}")
+                modules = bundler.topo_modules(
+                    ent.module,
+                    bundler.read_text(ent.path),
+                    project_dir,
+                    shared,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"FAIL {project}/{ent.module}: {exc}")
                 failed += 1
-        print(f"OK {project}/{entry} ({len(modules)} modules)")
+                continue
+            for name, path in modules.items():
+                rel = path.resolve()
+                try:
+                    rel.relative_to(project_dir.resolve())
+                    in_proj = True
+                except ValueError:
+                    in_proj = False
+                try:
+                    rel.relative_to(shared.resolve())
+                    in_shared = True
+                except ValueError:
+                    in_shared = False
+                if not (in_proj or in_shared):
+                    print(
+                        f"FAIL {project}/{ent.module}: "
+                        f"module {name} outside project/shared: {path}"
+                    )
+                    failed += 1
+            print(f"OK {project}/{ent.module} ({len(modules)} modules)")
     if failed:
         print(f"{failed} check(s) failed")
         return 1

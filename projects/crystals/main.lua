@@ -5,7 +5,7 @@
 -- Deploy:  dist/crystals.lua + crystals.cfg  (startup: shell.run("crystals"))
 
 package.path = package.path
-    .. ";/crystals/?.lua;crystals/?.lua;/shared/?.lua;shared/?.lua"
+    .. ";/projects/crystals/?.lua;projects/crystals/?.lua;/projects/shared/?.lua;projects/shared/?.lua"
 
 local configMod = require("config")
 local discover = require("discover")

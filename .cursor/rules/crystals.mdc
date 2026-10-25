@@ -1,6 +1,6 @@
 ---
 description: Context for crystals — gem upgrade feed into HV laser engravers
-globs: crystals/**/*
+globs: projects/crystals/**/*
 alwaysApply: false
 ---
 
