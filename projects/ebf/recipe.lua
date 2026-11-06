@@ -108,6 +108,21 @@ function recipe.label(snap)
     return "?"
 end
 
+--- True when this push took every item and fluid that was in the snapshot.
+local function bufferEmptied(before, movedItems, movedFluids)
+    for name, count in pairs((before and before.items) or {}) do
+        if (tonumber(count) or 0) - ((movedItems or {})[name] or 0) > 0 then
+            return false
+        end
+    end
+    for name, amount in pairs((before and before.fluids) or {}) do
+        if (tonumber(amount) or 0) - ((movedFluids or {})[name] or 0) > 0 then
+            return false
+        end
+    end
+    return true
+end
+
 local function countTypes(map)
     local n = 0
     for _ in pairs(map or {}) do
@@ -335,7 +350,13 @@ function recipe.pushRecipeUnits(
         end
     end
 
-    return true, units, movedItems, movedFluids, nil, buildSnapFromMaps(movedItemMap, movedFluidMap)
+    return true,
+        units,
+        movedItems,
+        movedFluids,
+        nil,
+        buildSnapFromMaps(movedItemMap, movedFluidMap),
+        bufferEmptied(snap, movedItemMap, movedFluidMap)
 end
 
 --- Push exactly one recipe unit from buffer → inputs.
@@ -407,10 +428,6 @@ function recipe.pushInspected(bufferName, inputBus, inputHatch, snap, listed, in
         return false, 0, 0, "empty", nil
     end
     return recipe.pushAtomic(bufferName, inputBus, inputHatch, snap)
-end
-
-function recipe.isNonEmpty(bufferName)
-    return recipe.hasContent(recipe.snapshot(bufferName))
 end
 
 function recipe.same(a, b)

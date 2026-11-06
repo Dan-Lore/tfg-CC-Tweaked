@@ -43,6 +43,9 @@ local activeBuf = nil
 local drainSweep = 0
 local lastScanAt = 0
 local SCAN_EVERY = 30
+-- AE block-until-empty often needs more than 2 ticks. Spin on the same buffer
+-- before paying for a list() of every other hv_buffer.
+local STICKY_SPINS = 4
 
 local function yieldNet()
     if net_watch.yieldWatch() then
@@ -128,6 +131,7 @@ local function anyPackWarn()
 end
 
 local function rescan(reason, showBoot)
+    local keepBuf = activeBuf
     setMode("SCAN")
     net = discover.scan(config)
     states = furnace.mergeStates(states, net.furnaces or {})
@@ -135,6 +139,15 @@ local function rescan(reason, showBoot)
     dirty = false
     packRr = 1
     activeBuf = nil
+    if keepBuf then
+        local buffers = net.buffers or {}
+        for i = 1, #buffers do
+            if buffers[i] == keepBuf then
+                activeBuf = keepBuf
+                break
+            end
+        end
+    end
     drainSweep = 0
     lastScanAt = furnace._nowSeconds()
     if reason then
@@ -163,7 +176,9 @@ end
 
 local function ensureNet()
     local now = furnace._nowSeconds()
-    if (now - (lastScanAt or 0)) >= SCAN_EVERY then
+    -- A full peripheral walk sleeps and drops the feed wave. Hotplug still rescans.
+    local feeding = anyInflight() or activeBuf ~= nil
+    if not feeding and (now - (lastScanAt or 0)) >= SCAN_EVERY then
         dirty = true
     end
     if dirty or #packList == 0 then
@@ -202,7 +217,7 @@ local function resolveActiveBuffer(buffers, waitRefills)
             return activeBuf
         end
         if known and waitRefills then
-            for _ = 1, 2 do
+            for _ = 1, STICKY_SPINS do
                 yieldNet()
                 if recipe.isNonEmpty(activeBuf) then
                     return activeBuf
@@ -257,9 +272,13 @@ local function feedPass()
     end
 
     local fed = 0
-    local maxVisits = math.max(4, #packList)
+    -- One wave can give every pack its L+R pair before we stop to drain.
+    local maxVisits = math.max(4, #packList * 2)
 
     for _ = 1, maxVisits do
+        if dirty then
+            break
+        end
         local st
         st, packRr = furnace.pickTarget(states, maxInf, packList, packRr)
         if not st then
@@ -267,7 +286,7 @@ local function feedPass()
             break
         end
 
-        local ok, units, _, _, err, movedSnap = recipe.pushRecipeUnits(
+        local ok, units, _, _, err, movedSnap, emptied = recipe.pushRecipeUnits(
             buf,
             st.inputBus,
             st.inputHatch,
@@ -278,14 +297,16 @@ local function feedPass()
         )
         if ok and (units or 0) > 0 then
             st.inflight = (st.inflight or 0) + units
+            furnace.noteFeed(st, units)
             st.fed = (st.fed or 0) + units
             st.lastFeedAt = furnace._nowSeconds()
             st.lastRecipe = recipe.label(movedSnap)
             st.lastError = nil
             fed = fed + units
             quietFed = quietFed + units
-            -- Same buffer often refills next; short wait only, no full rescan spam.
-            if not recipe.isNonEmpty(buf) then
+            -- Snapshot already says whether this push cleared the buffer.
+            -- Only then wait for the AE refill; do not list() again first.
+            if emptied then
                 local again = resolveActiveBuffer(buffers, true)
                 if not again then
                     break
@@ -296,6 +317,7 @@ local function feedPass()
             st.lastError = err
             if tostring(err):find("stuck", 1, true) then
                 st.inflight = maxInf
+                st.owed = 0
             else
                 setStatus("push fail " .. tostring(st.label) .. ": " .. tostring(err), true)
                 break
@@ -318,26 +340,20 @@ local function tick()
         return false
     end
 
+    -- Push the wave first. Draining every busy pack between recipes was leaving
+    -- half the furnaces empty while the buffer still had crafts.
     local worked = false
-    for _ = 1, 8 do
-        drainSweep = drainSweep + 1
-        local fullSweep = (drainSweep % 24 == 0) or not anyInflight()
-        local done = drainPass(fullSweep)
-        if done > 0 then
-            quietDone = quietDone + done
-            worked = true
-        end
-        local fed = feedPass()
-        if fed > 0 then
-            worked = true
-        end
-        if fed == 0 and done == 0 then
-            break
-        end
-        yieldNet()
-        if dirty then
-            break
-        end
+    local fed = feedPass()
+    if fed > 0 then
+        worked = true
+    end
+
+    drainSweep = drainSweep + 1
+    local fullSweep = (drainSweep % 24 == 0) or not anyInflight()
+    local done = drainPass(fullSweep)
+    if done > 0 then
+        quietDone = quietDone + done
+        worked = true
     end
 
     if quietFed > 0 or quietDone > 0 then

@@ -371,6 +371,44 @@ A.suite("ebf discover / recipe / furnace", {
         end,
     },
     {
+        name = "finished craft does not outrank an unopened pack",
+        fn = function()
+            -- Pair already got both recipes; one ingot finished (inflight 2→1).
+            -- owed stays 0, so the empty pack is opened next.
+            local states = {
+                [0] = { index = 0, inflight = 1, paired = 2, owed = 0 },
+                [1] = { index = 1, inflight = 0, paired = 2, owed = 0 },
+            }
+            local t = furnace.pickTarget(states, 8)
+            A.eq(t.index, 1)
+        end,
+    },
+    {
+        name = "sibling debt outranks an empty pack",
+        fn = function()
+            local states = {
+                [0] = { index = 0, inflight = 1, paired = 2, owed = 1 },
+                [1] = { index = 1, inflight = 0, paired = 2, owed = 0 },
+            }
+            local t = furnace.pickTarget(states, 8)
+            A.eq(t.index, 0)
+        end,
+    },
+    {
+        name = "noteFeed owes the sibling once then stays clear",
+        fn = function()
+            local st = furnace.newState({ index = 0, paired = 2 })
+            st.inflight = 1
+            A.eq(furnace.noteFeed(st, 1), 1)
+            st.inflight = 2
+            A.eq(furnace.noteFeed(st, 1), 0)
+            -- One craft finished; the next push is buffer, not a new pair debt.
+            st.inflight = 2
+            A.eq(furnace.noteFeed(st, 1), 0)
+            A.eq(st.owed, 0)
+        end,
+    },
+    {
         name = "isNonEmpty sees dust and nitrogen",
         fn = function()
             stub.reset()
@@ -550,7 +588,7 @@ A.suite("ebf discover / recipe / furnace", {
             })
             addInv("gtceu:lv_input_bus_0", {})
 
-            local ok, units, mi = recipe.pushRecipeUnits(
+            local ok, units, mi, _, _, _, emptied = recipe.pushRecipeUnits(
                 "gtceu:hv_buffer_1",
                 "gtceu:lv_input_bus_0",
                 nil,
@@ -562,6 +600,7 @@ A.suite("ebf discover / recipe / furnace", {
             A.truthy(ok)
             A.eq(units, 4)
             A.eq(mi, 4)
+            A.falsy(emptied)
             A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 4)
             A.eq(recipe.snapshot("gtceu:hv_buffer_1").items["gtceu:aluminium_dust"], 1)
         end,
@@ -579,7 +618,7 @@ A.suite("ebf discover / recipe / furnace", {
             addInv("gtceu:lv_input_bus_0", {})
             addTankInv("gtceu:ev_input_hatch_4x_0", {}, {})
 
-            local ok, units, mi, mf, err = recipe.pushRecipeUnits(
+            local ok, units, mi, mf, err, _, emptied = recipe.pushRecipeUnits(
                 "gtceu:hv_buffer_1",
                 "gtceu:lv_input_bus_0",
                 "gtceu:ev_input_hatch_4x_0",
@@ -592,6 +631,7 @@ A.suite("ebf discover / recipe / furnace", {
             A.eq(units, 1)
             A.eq(mi, 1)
             A.eq(mf, 1000)
+            A.truthy(emptied)
             A.truthy(recipe.isEmpty(recipe.snapshot("gtceu:hv_buffer_1")))
             A.eq(recipe.snapshot("gtceu:lv_input_bus_0").items["gtceu:aluminium_dust"], 1)
             A.eq(recipe.snapshot("gtceu:ev_input_hatch_4x_0").fluids["gtceu:nitrogen"], 1000)

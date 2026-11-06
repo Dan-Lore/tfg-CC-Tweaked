@@ -1,5 +1,6 @@
 -- One hatch index = one pack = furnaces NL + NR (shared 4 hatches).
--- Sticky inflight; concentrate fill; reconcile against input bus when drains miss.
+-- Sticky inflight; sibling debt (owed) so a finished craft does not look like
+-- an unfed L or R; reconcile against input bus when drains miss.
 
 local transfer = require("transfer")
 local recipe = require("recipe")
@@ -90,6 +91,9 @@ function furnace.newState(desc)
         outputBus = desc.outputBus,
         outputHatch = desc.outputHatch,
         inflight = 0,
+        -- nil until the first noteFeed. A number is sibling recipes still due
+        -- (1 = L was fed, R was not). Completions do not raise this.
+        owed = nil,
         fed = 0,
         drained = 0,
         lastRecipe = nil,
@@ -110,6 +114,9 @@ function furnace.mergeStates(oldMap, furnaceList)
         local st = furnace.newState(desc)
         if prev then
             st.inflight = math.max(0, tonumber(prev.inflight) or 0)
+            if prev.owed ~= nil then
+                st.owed = math.max(0, tonumber(prev.owed) or 0)
+            end
             st.fed = tonumber(prev.fed) or 0
             st.drained = tonumber(prev.drained) or 0
             st.lastRecipe = prev.lastRecipe
@@ -133,10 +140,59 @@ function furnace.listByIndex(stateMap)
     return list
 end
 
+--- Sibling still due. Once noteFeed has run, `owed` is the source of truth:
+-- a craft finishing drops inflight but must not jump the queue ahead of packs
+-- that have never been opened. Missing `owed` keeps the inflight 1→2 heuristic.
+local function owesSibling(st, inf, paired)
+    if st.owed ~= nil then
+        return (tonumber(st.owed) or 0) > 0
+    end
+    local p = math.max(1, tonumber(st.paired) or paired)
+    return inf > 0 and inf < p
+end
+
+--- Record a successful push. Call after inflight has already been increased.
+-- The first recipe of an idle pack owes (paired-1) siblings. Paying that down
+-- does not start a new debt. Top-ups after the pair was satisfied stay at 0,
+-- even if a completion has since dropped inflight below `paired`.
+function furnace.noteFeed(st, units)
+    if not st then
+        return 0
+    end
+    units = math.max(0, math.floor(tonumber(units) or 0))
+    local p = math.max(1, tonumber(st.paired) or 2)
+    local inf = tonumber(st.inflight) or 0
+    local before = inf - units
+    if before < 0 then
+        before = 0
+    end
+    local owed = st.owed
+    if owed == nil then
+        owed = 0
+    else
+        owed = math.max(0, tonumber(owed) or 0)
+    end
+    if units == 0 then
+        st.owed = owed
+        return owed
+    end
+    if owed > 0 then
+        owed = owed - units
+        if owed < 0 then
+            owed = 0
+        end
+    elseif before == 0 then
+        local rem = units % p
+        owed = (rem == 0) and 0 or (p - rem)
+    end
+    st.owed = owed
+    return owed
+end
+
 --- One hatch pack = L+R. Pick order:
--- 1) packs with 0 < inflight < paired (finish the sibling furnace)
+-- 1) packs that still owe the sibling furnace
 -- 2) empty packs (bring another L+R pair online)
--- 3) packs with paired <= inflight < max (buffer)
+-- 3) packs under max (buffer)
 -- Within a tier: least load, then round-robin from rrCursor.
 -- Returns st, newRrCursor
 function furnace.pickTarget(stateMap, maxInflight, packList, rrCursor)
@@ -178,8 +234,7 @@ function furnace.pickTarget(stateMap, maxInflight, packList, rrCursor)
 
     local paired = 2
     local st, nextRr = pickInTier(function(s, inf)
-        local p = math.max(1, tonumber(s.paired) or paired)
-        return inf > 0 and inf < p
+        return owesSibling(s, inf, paired)
     end)
     if st then
         return st, nextRr
@@ -527,6 +582,7 @@ function furnace.feedOne(stateMap, bufferName, maxInflight, _snap)
         return nil, err or "push failed"
     end
     st.inflight = (st.inflight or 0) + 1
+    furnace.noteFeed(st, 1)
     st.fed = (st.fed or 0) + 1
     st.lastFeedAt = nowSeconds()
     st.lastRecipe = recipe.label(movedSnap)
