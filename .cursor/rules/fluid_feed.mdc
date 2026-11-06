@@ -1,0 +1,36 @@
+---
+description: Context for fluid_feed — RR 144mb fluid push from buffer into empty EV hatches
+globs: projects/fluid_feed/**/*
+alwaysApply: false
+---
+
+# fluid_feed
+
+CC: Tweaked script for TerraFirmaGreg. Pushes **exactly 144 mb** of buffer fluids into empty `ev_input_hatch_4x` hatches, round-robin by fluid type and by hatch. As fast as CC allows (`sleep(0)` yield only) with mandatory hotplug rescan.
+
+## Not in scope
+
+- No draining / topping up partial hatches (1–143 or >144 stay as-is; monitor alarms)
+- No item moves, no machine enable/disable
+- No multi-buffer (one `ingredient_buffer` for now)
+
+## Layout
+
+- Monitor: left (1 block) — minimal status; alarm only if hatch has fluid but amount ≠ 144 mb (empty is OK)
+- Source: `expatternprovider:ingredient_buffer_0` (`buffer` in cfg)
+- Hatches: all `gtceu:ev_input_hatch_4x_*` on the wired network (`hatch_substr`)
+
+## Behaviour
+
+- Free hatch = total fluid across tanks is 0
+- One op = `pushFluid` exactly `amount` (default 144); skip if hatch non-empty or stock < amount
+- Round-robin cursors advance on successful pushes (fluids + hatches)
+- Hotplug via `net_watch`; flush boot attaches before the loop
+
+## Deploy
+
+```text
+python tools/bundle_project.py fluid_feed
+```
+
+Copy **both** `dist/fluid_feed.lua` and `dist/fluid_feed.cfg` onto the computer (same folder). Edit the `.cfg` in-game; no rebuild needed for names / amount.

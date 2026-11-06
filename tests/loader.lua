@@ -24,7 +24,7 @@ return function(opts)
     }
     local projList = opts.projects or {
         "craft", "shared", "ae_stats", "power", "ae2_feed",
-        "crystals", "distill", "ebf", "fission", "railgun",
+        "crystals", "distill", "ebf", "fission", "railgun", "fluid_feed",
     }
     for i = 1, #projList do
         local name = projList[i]
