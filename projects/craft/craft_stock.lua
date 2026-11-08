@@ -92,7 +92,6 @@ function craft_stock.snapshot(store, opts, itemNames, fluidNames)
             end
         end
         snap._invCache[invName] = bag
-        sleep(0) -- yield after each peripheral scan
         return bag
     end
 

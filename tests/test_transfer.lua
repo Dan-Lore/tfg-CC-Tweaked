@@ -92,6 +92,8 @@ A.suite("transfer", {
             T.stub.addPeripheral("fridge2", inv)
             local n = transfer.countItem("fridge2", "firmalife:food/cooked_pizza")
             A.eq(n, 2, "rotten pizza excluded when food module registered")
+            local all = transfer.countItem("fridge2", "firmalife:food/cooked_pizza", { allowSpoiled = true })
+            A.eq(all, 6, "allowSpoiled counts rotten too (bus drain)")
         end,
     },
     {

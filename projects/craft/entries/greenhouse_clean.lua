@@ -8,7 +8,8 @@
 package.path = package.path
     .. ";/projects/shared/?.lua;projects/shared/?.lua;/projects/craft/?.lua;projects/craft/?.lua"
 
-require("food")
+-- Do NOT require food.lua here: spoil-skip would leave rotten crops stuck in
+-- output buses forever. Cleaner must evacuate everything (fresh or spoiled).
 local transfer = require("transfer")
 local recipes = require("recipes")
 local storage = require("storage")
@@ -16,6 +17,8 @@ local peripherals = require("peripherals")
 local util = require("util")
 
 local FLORA_ITEM = "tfg:flora_pellets"
+-- Always move spoiled food out of buses / overflow (craft still skips it for recipes).
+local MOVE_OPTS = { allowSpoiled = true }
 
 --- Seed/plant chest for this item, if it matches any grow recipe seed mapping.
 local function seedDestForItem(store, growRecipes, itemName)
@@ -47,7 +50,7 @@ end
 --- Move to dest. Spill into overflow ONLY if that item's configured home is overflow
 -- (basil leaves). Never dump perishable fridge food into a bronze crate.
 local function moveToDest(store, from, dest, itemName)
-    local before = transfer.countItem(from, itemName)
+    local before = transfer.countItem(from, itemName, MOVE_OPTS)
     if before <= 0 then
         return 0
     end
@@ -55,15 +58,15 @@ local function moveToDest(store, from, dest, itemName)
         return 0
     end
 
-    local moved = transfer(from, dest, itemName, -1)
-    local left = transfer.countItem(from, itemName)
+    local moved = transfer(from, dest, itemName, -1, MOVE_OPTS)
+    local left = transfer.countItem(from, itemName, MOVE_OPTS)
     local overflow = store.overflow()
     local home = store.destFor(itemName)
 
     if left > 0 and overflow and home == overflow and dest ~= overflow
         and peripheral.isPresent(overflow)
     then
-        local buffered = transfer(from, overflow, itemName, -1)
+        local buffered = transfer(from, overflow, itemName, -1, MOVE_OPTS)
         if buffered > 0 then
             print(("overflow: %s x%s -> %s"):format(
                 util.short(itemName), tostring(buffered), util.short(overflow)
@@ -101,7 +104,7 @@ local function drainOverflow(store, growRecipes)
             else
                 local dest = destForItem(store, growRecipes, name)
                 if dest and dest ~= overflow and peripheral.isPresent(dest) then
-                    local n = transfer(overflow, dest, name, -1)
+                    local n = transfer(overflow, dest, name, -1, MOVE_OPTS)
                     if n > 0 then
                         print(("drain: %s x%s -> %s"):format(
                             util.short(name), tostring(n), util.short(dest)

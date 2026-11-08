@@ -1,5 +1,6 @@
 -- Tiny scrolling log for a side monitor (default: left).
 -- Also mirrors to the computer terminal via print.
+-- Timestamps are seconds since open (os.clock). Redraw is deferred so I/O spam stays fast.
 
 local craft_log = {}
 
@@ -9,11 +10,18 @@ local state = {
     maxLines = 50,
     w = 10,
     h = 5,
+    t0 = 0,
+    dirty = false,
+    sinceRedraw = 0,
 }
+
+local REDRAW_EVERY = 4 -- lines between monitor redraws
 
 local function redraw()
     local mon = state.mon
     if not mon then
+        state.dirty = false
+        state.sinceRedraw = 0
         return
     end
     local ok = pcall(function()
@@ -35,6 +43,8 @@ local function redraw()
             end
         end
     end)
+    state.dirty = false
+    state.sinceRedraw = 0
     if not ok then
         state.mon = nil
     end
@@ -58,25 +68,43 @@ function craft_log.open(sideOrName, textScale)
     state.h = h
     state.lines = {}
     state.maxLines = math.max(h * 4, 40)
+    state.t0 = os.clock()
+    state.dirty = false
+    state.sinceRedraw = 0
     craft_log.write("log " .. tostring(w) .. "x" .. tostring(h))
     return true
+end
+
+function craft_log.flush()
+    if state.dirty then
+        redraw()
+    end
 end
 
 function craft_log.write(msg)
     msg = tostring(msg or "")
     msg = msg:gsub("[\r\n]", " ")
-    state.lines[#state.lines + 1] = msg
+    local dt = os.clock() - (state.t0 or os.clock())
+    local stamped = string.format("%.1f %s", dt, msg)
+    state.lines[#state.lines + 1] = stamped
     while #state.lines > state.maxLines do
         table.remove(state.lines, 1)
     end
-    -- Terminal always; monitor redraw is best-effort and must not throw.
-    print("[craft] " .. msg)
-    pcall(redraw)
-    sleep(0)
+    print("[craft] " .. stamped)
+    state.dirty = true
+    state.sinceRedraw = (state.sinceRedraw or 0) + 1
+    if state.sinceRedraw >= REDRAW_EVERY then
+        redraw()
+    end
 end
 
 function craft_log.step(label)
     craft_log.write(">" .. tostring(label))
+end
+
+--- Elapsed ms since t0 (os.clock).
+function craft_log.msSince(t0)
+    return math.floor((os.clock() - (t0 or 0)) * 1000 + 0.5)
 end
 
 return craft_log

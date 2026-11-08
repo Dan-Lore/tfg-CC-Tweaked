@@ -25,6 +25,7 @@ This repo is **personal** Lua code for [CC: Tweaked](https://tweaked.cc/) (Compu
 - Lua lives under `projects/<name>/` (+ `projects/shared/`). Single-entry: `main.lua` + `<name>.cfg`. Multi-entry: `entries/*.lua`; craft fragments in `cfg/` (bundler merges to `dist/<entry>.cfg` with `[storage]` / `[recipes]`). Deploy via `python tools/bundle_project.py <project> [entry]` (or `--all`).
 - `greenhouse_clean.lua` is autonomous — any computer with configs + peripheral network; not tied to `craft_ui`; keeps GH off and only empties buses
 - Food always goes to `main` fridge (`tfg:ev_food_refrigerator_0`); never spill perishables into the bronze overflow crate. Only non-perishables (e.g. `firmalife:spice/basil_leaves`) use `route` → `overflow`; `greenhouse_clean` drains stray food from overflow back to fridge
+- Machine clearJunk/clearMachine falls back to `trash` (e.g. `gtceu:hv_buffer_11`) when home crates are full; optional `fluid_trash` for oil/water when source tanks are full
 - Greenhouse products are pulled from `output_bus_prefix` + circuit (default `gtceu:mv_output_bus_N`), not from the greenhouse controller block
 - Fluids use `fluid_source | tagOrFluid | tank | concreteFluid` in `storage.cfg` (e.g. `#tfg:clean_water` → `gtceu:lv_super_tank_1` / `minecraft:water`); craft refuses to start if any input (item or fluid) is missing
 - Processing crafts in batches (`times=N` one push); while waiting, continuously drain machine outputs so GT slots never fill/stall; sibling inputs run in parallel with a per-machine lock; UI amount ±1/±10 (1–100)

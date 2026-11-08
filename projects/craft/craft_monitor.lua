@@ -5,13 +5,14 @@
 local recipes = require("recipes")
 local craft_stock = require("craft_stock")
 local craft_plan = require("craft_plan")
+local craft_io = require("craft_io")
 local machine_lock = require("machine_lock")
 local craft_log = require("craft_log")
 
 local craft_monitor = {}
 
-local IDLE_SLEEP = 0.1
-local SKIP_SLEEP = 0.25
+local IDLE_SLEEP = 0.05
+local SKIP_SLEEP = 0.15
 local MAX_PARALLEL = 6
 
 local function emitActivity(opts, text)
@@ -68,7 +69,9 @@ local function unitsFromDetail(job, detail, fallbackSets)
 end
 
 local function planTick(deps, index, store, opts, rootItemId, rootStill, inflight, preloadItems, preloadFluids, machineCache)
+    local t0 = os.clock()
     local snap = craft_stock.snapshot(store, opts, preloadItems, preloadFluids)
+    local snapMs = craft_log.msSince(t0)
     local _need, deficit, hard = craft_plan.computeDemand(
         index,
         rootItemId,
@@ -91,6 +94,8 @@ local function planTick(deps, index, store, opts, rootItemId, rootStill, infligh
         deficit = deficit,
         hard = hard,
         jobs = jobs,
+        snapMs = snapMs,
+        planMs = craft_log.msSince(t0),
     }
 end
 
@@ -116,6 +121,17 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
         sleep(0)
     end
     log("machines ok")
+
+    local trashName = store and store.trash and store.trash() or nil
+    if trashName then
+        if peripheral.isPresent(trashName) then
+            log("trash " .. shortName(trashName))
+        else
+            log("trash MISSING " .. tostring(trashName))
+        end
+    else
+        log("trash unset")
+    end
 
     local function rootDone()
         return rootCrafted >= rootWant
@@ -241,7 +257,10 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
                 end
                 emitActivity(opts, "waiting...")
                 if skipStreak == 0 then
-                    log("wait")
+                    log(string.format(
+                        "wait plan=%dms jobs=0",
+                        tick.planMs or 0
+                    ))
                 end
                 sleep(IDLE_SLEEP)
             else
@@ -249,8 +268,13 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
                 for i = 1, #wave do
                     names[i] = shortName(wave[i].itemId)
                 end
-                log("wave " .. table.concat(names, "+"))
+                log(string.format(
+                    "wave %s plan=%dms",
+                    table.concat(names, "+"),
+                    tick.planMs or 0
+                ))
                 emitActivity(opts, table.concat(names, " | "))
+                local waveT0 = os.clock()
 
                 local slots = {}
                 local fns = {}
@@ -285,6 +309,8 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
                         parallel.waitForAll(table.unpack(fns))
                     end
                 end)
+                log(string.format("wave end %dms", craft_log.msSince(waveT0)))
+                craft_log.flush()
 
                 -- Always release inflight reservations.
                 for i = 1, #wave do
@@ -315,14 +341,20 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
                     elseif type(slot.detail) == "table" and slot.detail.skipped then
                         log("skip " .. shortName(job.itemId) .. " " .. tostring(slot.detail.reason or ""))
                     elseif not slot.ok then
-                        local m = (type(slot.detail) == "table" and slot.detail.missing and slot.detail.missing.name)
-                            or (type(slot.detail) == "table" and slot.detail.error)
+                        local det = type(slot.detail) == "table" and slot.detail or nil
+                        local errKind = det and det.error
+                        local m = (det and det.missing and det.missing.name)
+                            or errKind
                             or "fail"
                         local msg = tostring(m)
-                        -- Lua exceptions look like "/prog.lua:123: ..."; treat as soft.
-                        if msg:find("%.lua:", 1, false) or msg:find("Too long", 1, true) then
+                        -- Soft: Lua blips, or a single machine stall — do not kill whole pizza request.
+                        if errKind == "craft_timeout"
+                            or errKind == "craft_short"
+                            or msg:find("%.lua:", 1, false)
+                            or msg:find("Too long", 1, true)
+                        then
                             softFail = true
-                            log("ERR " .. shortName(job.itemId) .. " " .. msg:sub(1, 40))
+                            log("stall " .. shortName(job.itemId) .. " " .. msg:sub(1, 36))
                         else
                             log("fail " .. shortName(job.itemId) .. " " .. msg)
                             firstErr = firstErr or slot.detail

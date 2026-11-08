@@ -19,6 +19,8 @@ local NAMED_KEYS = {
     main = true,
     flora = true,
     overflow = true,
+    trash = true, -- dump when normal dests are full (machine clear / junk)
+    fluid_trash = true, -- optional tank that accepts dumped fluids
     seed_chest_prefix = true,
     output_bus_prefix = true,
 }
@@ -94,7 +96,9 @@ local function resolveAlias(cfg, dest)
     if not dest then
         return nil
     end
-    if dest == "main" or dest == "flora" or dest == "overflow" then
+    if dest == "main" or dest == "flora" or dest == "overflow"
+        or dest == "trash" or dest == "fluid_trash"
+    then
         return cfg.named[dest]
     end
     return dest
@@ -118,6 +122,16 @@ function storage.load(path)
 
     function cfg.overflow()
         return cfg.named.overflow
+    end
+
+    --- Item dump when fridge/crates are full (machine clearJunk / clearMachine).
+    function cfg.trash()
+        return cfg.named.trash
+    end
+
+    --- Optional fluid dump tank when oil/water source tanks are full.
+    function cfg.fluidTrash()
+        return cfg.named.fluid_trash
     end
 
     function cfg.seedChestPrefix()

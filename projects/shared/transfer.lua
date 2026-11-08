@@ -102,14 +102,27 @@ local function slotDetail(inv, slot, itemQuery, itemName)
     return nil
 end
 
-local function slotUsable(itemName, detail, itemQuery)
-    if transfer.isSpoiled(detail) then
+local function slotUsable(itemName, detail, itemQuery, allowSpoiled)
+    if not allowSpoiled and transfer.isSpoiled(detail) then
         return false
     end
     return transfer.matches(itemName, itemTagsFromDetail(detail), itemQuery)
 end
 
-local function transferItems(from, to, itemQuery, amount)
+-- GT/CC list() keys are sometimes strings; pullItems/pushItems need numeric slots.
+local function slotNum(slot)
+    local n = tonumber(slot)
+    if n then
+        return n
+    end
+    return slot
+end
+
+--- Move items from -> to matching itemQuery.
+-- opts.preferPull: extract FROM a machine into storage (GT food often needs sink.pullItems).
+-- Inserts into machines must NOT use machine.pullItems(storage) — GT can grab the wrong
+-- fridge stack (e.g. cooked_pizza into processor_30 while asking for feta).
+local function transferItems(from, to, itemQuery, amount, opts)
     if not from or not to or from == to then
         return 0
     end
@@ -117,7 +130,16 @@ local function transferItems(from, to, itemQuery, amount)
         return 0
     end
     local source = peripheral.wrap(from)
-    if not source or not source.list or not source.pushItems then
+    if not source or not source.list then
+        return 0
+    end
+    local sink = peripheral.wrap(to)
+    local preferPull = opts and opts.preferPull == true
+    if preferPull then
+        if not (sink and sink.pullItems) and not source.pushItems then
+            return 0
+        end
+    elseif not source.pushItems then
         return 0
     end
     local movedTotal = 0
@@ -126,6 +148,7 @@ local function transferItems(from, to, itemQuery, amount)
     if not moveAll and amount <= 0 then
         return 0
     end
+    local allowSpoiled = opts and opts.allowSpoiled == true
 
     local listed = source.list()
     if not listed then
@@ -133,15 +156,35 @@ local function transferItems(from, to, itemQuery, amount)
     end
 
     local n = 0
-    for slot, item in pairs(listed) do
+    for rawSlot, item in pairs(listed) do
+        local slot = slotNum(rawSlot)
         if not moveAll and movedTotal >= amount then
             break
         end
         if moveAll or movedTotal < amount then
             local detail = slotDetail(source, slot, itemQuery, item.name)
-            if slotUsable(item.name, detail, itemQuery) then
+            if slotUsable(item.name, detail, itemQuery, allowSpoiled) then
                 local limit = moveAll and item.count or (amount - movedTotal)
-                local moved = source.pushItems(to, slot, limit) or 0
+                local moved = 0
+                if preferPull and sink and sink.pullItems then
+                    local ok, got = pcall(sink.pullItems, from, slot, limit)
+                    if ok then
+                        moved = tonumber(got) or 0
+                    end
+                end
+                if moved < limit and source.pushItems then
+                    local ok, got = pcall(source.pushItems, to, slot, limit - moved)
+                    if ok then
+                        moved = moved + (tonumber(got) or 0)
+                    end
+                end
+                -- Extract only: push may fail on GT food machines; pull already tried first.
+                if preferPull and moved < limit and sink and sink.pullItems then
+                    local ok, got = pcall(sink.pullItems, from, slot, limit - moved)
+                    if ok then
+                        moved = moved + (tonumber(got) or 0)
+                    end
+                end
                 movedTotal = movedTotal + moved
             end
         end
@@ -155,12 +198,13 @@ local function transferItems(from, to, itemQuery, amount)
 end
 
 setmetatable(transfer, {
-    __call = function(_, from, to, itemName, amount)
-        return transferItems(from, to, itemName, amount)
+    __call = function(_, from, to, itemName, amount, opts)
+        return transferItems(from, to, itemName, amount, opts)
     end,
 })
 
-function transfer.countItem(invName, itemQuery)
+--- opts.allowSpoiled: count rotten food too (greenhouse bus drain).
+function transfer.countItem(invName, itemQuery, opts)
     if not invName or not peripheral.isPresent(invName) then
         return 0
     end
@@ -168,15 +212,17 @@ function transfer.countItem(invName, itemQuery)
     if not inv or not inv.list then
         return 0
     end
+    local allowSpoiled = opts and opts.allowSpoiled == true
     local total = 0
     local listed = inv.list()
     if not listed then
         return 0
     end
     local n = 0
-    for slot, item in pairs(listed) do
+    for rawSlot, item in pairs(listed) do
+        local slot = slotNum(rawSlot)
         local detail = slotDetail(inv, slot, itemQuery, item.name)
-        if slotUsable(item.name, detail, itemQuery) then
+        if slotUsable(item.name, detail, itemQuery, allowSpoiled) then
             total = total + (item.count or 0)
         end
         n = n + 1
@@ -187,18 +233,18 @@ function transfer.countItem(invName, itemQuery)
     return total
 end
 
-function transfer.countFromMany(sources, itemQuery)
+function transfer.countFromMany(sources, itemQuery, opts)
     local total = 0
     if not sources then
         return 0
     end
     for i = 1, #sources do
-        total = total + transfer.countItem(sources[i], itemQuery)
+        total = total + transfer.countItem(sources[i], itemQuery, opts)
     end
     return total
 end
 
-function transfer.fromMany(sources, to, itemQuery, amount)
+function transfer.fromMany(sources, to, itemQuery, amount, opts)
     if not sources or not to then
         return 0
     end
@@ -208,9 +254,9 @@ function transfer.fromMany(sources, to, itemQuery, amount)
         local from = sources[i]
         if from and from ~= to and peripheral.isPresent(from) then
             if moveAll then
-                movedTotal = movedTotal + transferItems(from, to, itemQuery, -1)
+                movedTotal = movedTotal + transferItems(from, to, itemQuery, -1, opts)
             elseif movedTotal < amount then
-                movedTotal = movedTotal + transferItems(from, to, itemQuery, amount - movedTotal)
+                movedTotal = movedTotal + transferItems(from, to, itemQuery, amount - movedTotal, opts)
             end
             if not moveAll and movedTotal >= amount then
                 break
@@ -220,7 +266,7 @@ function transfer.fromMany(sources, to, itemQuery, amount)
     return movedTotal
 end
 
-function transfer.toMany(from, destinations, itemQuery, amount)
+function transfer.toMany(from, destinations, itemQuery, amount, opts)
     if not from or not destinations then
         return 0
     end
@@ -230,9 +276,9 @@ function transfer.toMany(from, destinations, itemQuery, amount)
         local to = destinations[i]
         if to and to ~= from and peripheral.isPresent(to) then
             if moveAll then
-                movedTotal = movedTotal + transferItems(from, to, itemQuery, -1)
+                movedTotal = movedTotal + transferItems(from, to, itemQuery, -1, opts)
             elseif movedTotal < amount then
-                movedTotal = movedTotal + transferItems(from, to, itemQuery, amount - movedTotal)
+                movedTotal = movedTotal + transferItems(from, to, itemQuery, amount - movedTotal, opts)
             end
             if not moveAll and movedTotal >= amount then
                 break
