@@ -315,6 +315,36 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
                     end
                 end
 
+                log("wave go n=" .. tostring(#fns))
+                -- Watchdog: while siblings (often grow) still run, keep logging + paint monitor.
+                if #fns > 1 then
+                    local finished = {}
+                    for i = 1, #fns do
+                        local body = fns[i]
+                        fns[i] = function()
+                            body()
+                            finished[i] = true
+                        end
+                    end
+                    fns[#fns + 1] = function()
+                        while true do
+                            local pending = {}
+                            local allDone = true
+                            for i = 1, #wave do
+                                if not finished[i] then
+                                    allDone = false
+                                    pending[#pending + 1] = shortName(wave[i].itemId)
+                                end
+                            end
+                            if allDone then
+                                return
+                            end
+                            log("wave wait " .. table.concat(pending, "+"))
+                            craft_log.flush(true)
+                            sleep(5)
+                        end
+                    end
+                end
                 local parOk, parErr = pcall(function()
                     if #fns == 1 then
                         fns[1]()
@@ -323,7 +353,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
                     end
                 end)
                 log(string.format("wave end %dms", craft_log.msSince(waveT0)))
-                craft_log.flush()
+                craft_log.flush(true)
 
                 -- Always release inflight reservations.
                 for i = 1, #wave do
@@ -363,6 +393,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
                         -- Soft: Lua blips, or a single machine stall — do not kill whole pizza request.
                         if errKind == "craft_timeout"
                             or errKind == "craft_short"
+                            or errKind == "grow_timeout"
                             or msg:find("%.lua:", 1, false)
                             or msg:find("Too long", 1, true)
                         then

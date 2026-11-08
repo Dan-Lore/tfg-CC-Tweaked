@@ -85,7 +85,8 @@ local function main()
         craftWaitTimeout = store.getNumber("craft_wait_timeout", 300),
         waitTicks = store.getNumber("wait_ticks", nil),
         growPulse = store.getNumber("grow_pulse", 3),
-        growWaitTimeout = store.getNumber("grow_wait_timeout", 600),
+        -- Keep grow short in pizza waves so one stuck greenhouse cannot freeze the request.
+        growWaitTimeout = store.getNumber("grow_wait_timeout", 90),
     }
 
     log(("pizza keep %s @%s /%ss"):format(

@@ -299,8 +299,10 @@ function craft_io.sweepProcessors(list, resolveMachine, store, opts, machineCach
 end
 
 --- Evacuate occupied slots (+ fluids) via list(). Never poke empty slots (GT hang).
+-- opts.budgetSec: soft time cap (default 2s) so clear cannot freeze parallel waves.
 function craft_io.clearMachine(machine, store, opts)
     local t0 = os.clock()
+    local budget = (opts and tonumber(opts.budgetSec)) or 2.0
     if not machine or not peripheral.isPresent(machine) then
         return 0
     end
@@ -323,7 +325,12 @@ function craft_io.clearMachine(machine, store, opts)
 
     local cleared = 0
     local tried = 0
+    local timedOut = false
     for rawSlot, item in pairs(listed) do
+        if (os.clock() - t0) >= budget then
+            timedOut = true
+            break
+        end
         local slot = tonumber(rawSlot) or rawSlot
         if item and item.name and not isConfigItem(item.name) then
             tried = tried + 1
@@ -336,25 +343,28 @@ function craft_io.clearMachine(machine, store, opts)
                     "clr %s s%d %s x%d ->%s",
                     shortId(machine), slot, shortId(item.name), n, shortId(sink)
                 ))
-            else
+            elseif err then
                 ioLog(string.format(
-                    "clr FAIL %s s%d %s x%d %s",
-                    shortId(machine),
-                    slot,
-                    shortId(item.name),
-                    item.count or 0,
-                    err and tostring(err):sub(1, 20) or "moved0"
+                    "clr FAIL %s s%d %s %s",
+                    shortId(machine), slot, shortId(item.name), tostring(err):sub(1, 16)
                 ))
             end
+            sleep(0)
         end
     end
 
-    clearMachineFluids(inv, machine, store, nil)
+    if not timedOut then
+        clearMachineFluids(inv, machine, store, nil)
+    end
 
-    if tried > 0 then
+    if tried > 0 or timedOut then
         ioLog(string.format(
-            "clr %s +%d/%d %dms",
-            shortId(machine), cleared, tried, craft_log.msSince(t0)
+            "clr %s +%d/%d %dms%s",
+            shortId(machine),
+            cleared,
+            tried,
+            craft_log.msSince(t0),
+            timedOut and " budget" or ""
         ))
     end
     return cleared
@@ -642,11 +652,17 @@ function craft_io.run(recipe, opts)
     end
 
     -- Shared processors (e.g. _0 dough/feta, _1 dough/sauce) keep leftover/spoiled
-    -- stacks that block the next recipe — empty them first.
-    craft_io.clearMachine(opts.machine, store, opts)
+    -- stacks that block the next recipe — empty them first (time-capped).
+    craft_io.clearMachine(opts.machine, store, { budgetSec = 1.5 })
 
     local oneshot = recipe.oneshot == true
     local targetSets = times
+    ioLog(string.format(
+        "run %s x%d m=%s",
+        shortId(recipe.outputs[1] and recipe.outputs[1].name or recipe.machine),
+        targetSets,
+        shortId(opts.machine)
+    ))
     local need, anyItem, fluidKeys, anyFluid = craft_io.buildNeedMap(recipe.outputs, targetSets)
     local anyOutput = anyItem or anyFluid
     local pulled = {}
@@ -670,8 +686,8 @@ function craft_io.run(recipe, opts)
     local JUNK_EVERY = 1.0 -- clearJunk is expensive (getItemDetail); not every poll
     local STALL_STOP_PUSH = 6 -- seconds
     local STALL_FAIL = 10 -- seconds
-    -- Absolute craft_wait_timeout can be 300s; abort much sooner if GT produces nothing.
-    local OUT_STALL = math.min(45, math.max(15, timeout * 0.25))
+    -- Absolute craft_wait_timeout can be 300s; abort sooner if GT produces nothing.
+    local OUT_STALL = math.min(25, math.max(12, timeout * 0.15))
     local BEAT_EVERY = 5
 
     local function maybeClearJunk(force)
@@ -683,8 +699,8 @@ function craft_io.run(recipe, opts)
     end
 
     local function abortClear()
-        craft_io.drainToward(pullFrom, need, pulled, store, out, recipe, fluidKeys)
-        craft_io.clearMachine(opts.machine, store, opts)
+        -- Quick evacuate only — no drainToward retries (those can hang the wave).
+        craft_io.clearMachine(opts.machine, store, { budgetSec = 1.5 })
     end
 
     local function pulledTotal()
@@ -711,26 +727,34 @@ function craft_io.run(recipe, opts)
         if total > lastPulledTotal then
             lastPulledTotal = total
             outStallSince = nil
-            return
+            return false
         end
         if setsPushed < 1 then
-            return
+            return false
         end
         local now = os.clock()
         if not outStallSince then
             outStallSince = now
         end
+        -- Stuck output sitting in machine but not transferable → fail sooner than cold wait.
+        local stallLimit = OUT_STALL
+        local name, left = shortNeed()
+        if name and left > 0 and opts.machine then
+            local stuck = transfer.countItem(opts.machine, name) or 0
+            if stuck > 0 then
+                stallLimit = math.min(OUT_STALL, 15)
+            end
+        end
         if (now - lastBeatAt) >= BEAT_EVERY then
             lastBeatAt = now
-            local name, left = shortNeed()
             ioLog(string.format(
-                "wait out %s %d left %ds",
+                "wait out %s %d %ds",
                 shortId(name or "?"),
                 left,
                 math.floor(now - outStallSince)
             ))
         end
-        if (now - outStallSince) >= OUT_STALL then
+        if (now - outStallSince) >= stallLimit then
             return true
         end
         return false
@@ -787,7 +811,8 @@ function craft_io.run(recipe, opts)
     end
 
     local function finishOk()
-        craft_io.clearMachine(opts.machine, store, opts)
+        -- Do NOT clearMachine here: it blocked parallel wave siblings for a minute+ on GT.
+        -- Next run() still clears the machine before pushing.
         local detail = successDetail()
         if targetSets < times then
             local shortName = nil
@@ -821,12 +846,6 @@ function craft_io.run(recipe, opts)
     end
 
     local runT0 = os.clock()
-    ioLog(string.format(
-        "run %s x%d m=%s",
-        shortId(recipe.outputs[1] and recipe.outputs[1].name or recipe.machine),
-        targetSets,
-        shortId(opts.machine)
-    ))
 
     while os.clock() < deadline do
         craft_io.drainToward(pullFrom, need, pulled, store, out, recipe, fluidKeys)
@@ -834,16 +853,18 @@ function craft_io.run(recipe, opts)
         emitSetsProgress()
         if outputsComplete() then
             ioLog(string.format("run ok %dms", craft_log.msSince(runT0)))
-            return finishOk()
+            local a, b = finishOk()
+            ioLog("run ret")
+            return a, b
         end
         if noteOutputProgress() then
-            abortClear()
             local name, left = shortNeed()
             ioLog(string.format(
                 "run stall %dms no out %ds",
                 craft_log.msSince(runT0),
-                math.floor(OUT_STALL)
+                math.floor(os.clock() - (outStallSince or runT0))
             ))
+            abortClear()
             return false, {
                 error = "craft_timeout",
                 missing = {
@@ -874,7 +895,9 @@ function craft_io.run(recipe, opts)
                 craft_io.drainToward(pullFrom, need, pulled, store, out, recipe, fluidKeys)
                 if outputsComplete() then
                     ioLog(string.format("run ok %dms", craft_log.msSince(runT0)))
-                    return finishOk()
+                    local a, b = finishOk()
+                    ioLog("run ret")
+                    return a, b
                 end
                 -- Yield so CC never hits "too long without yielding" on large batches.
                 sleep(0)
@@ -914,7 +937,9 @@ function craft_io.run(recipe, opts)
 
         if outputsComplete() then
             ioLog(string.format("run ok %dms", craft_log.msSince(runT0)))
-            return finishOk()
+            local a, b = finishOk()
+            ioLog("run ret")
+            return a, b
         end
         -- Brief yield while waiting on GT / oneshot / stock.
         sleep(POLL)
@@ -924,7 +949,9 @@ function craft_io.run(recipe, opts)
     emitSetsProgress()
     if outputsComplete() then
         ioLog(string.format("run ok %dms", craft_log.msSince(runT0)))
-        return finishOk()
+        local a, b = finishOk()
+        ioLog("run ret")
+        return a, b
     end
 
     abortClear()
