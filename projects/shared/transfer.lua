@@ -85,14 +85,8 @@ local function itemTagsFromDetail(detail)
     return nil
 end
 
---- Detail for #tags, or exact food ids when food module registered (spoil filter).
-local function slotDetail(inv, slot, itemQuery, itemName)
-    if not inv.getItemDetail then
-        return nil
-    end
-    local need = transfer.isTag(itemQuery)
-        or (itemName and transfer.isFoodItem(itemName))
-    if not need then
+local function getDetail(inv, slot)
+    if not inv or not inv.getItemDetail then
         return nil
     end
     local ok, detail = pcall(inv.getItemDetail, slot)
@@ -102,13 +96,6 @@ local function slotDetail(inv, slot, itemQuery, itemName)
     return nil
 end
 
-local function slotUsable(itemName, detail, itemQuery, allowSpoiled)
-    if not allowSpoiled and transfer.isSpoiled(detail) then
-        return false
-    end
-    return transfer.matches(itemName, itemTagsFromDetail(detail), itemQuery)
-end
-
 -- GT/CC list() keys are sometimes strings; pullItems/pushItems need numeric slots.
 local function slotNum(slot)
     local n = tonumber(slot)
@@ -116,6 +103,39 @@ local function slotNum(slot)
         return n
     end
     return slot
+end
+
+--- Fast slot filter: name-fallback tags skip getItemDetail on non-matches (huge fridge win).
+local function slotUsable(inv, slot, itemName, itemQuery, allowSpoiled)
+    if not itemName then
+        return false
+    end
+
+    if not transfer.isTag(itemQuery) then
+        if itemName ~= itemQuery then
+            return false
+        end
+        if allowSpoiled or not transfer.isFoodItem(itemName) then
+            return true
+        end
+        return not transfer.isSpoiled(getDetail(inv, slot))
+    end
+
+    local tagId = transfer.tagId(itemQuery)
+    local fb = tagFallbacks[tagId]
+    if fb and fb(itemName) == true then
+        if allowSpoiled or not transfer.isFoodItem(itemName) then
+            return true
+        end
+        return not transfer.isSpoiled(getDetail(inv, slot))
+    end
+
+    -- No name fallback: need NBT tags (and spoil) from detail.
+    local detail = getDetail(inv, slot)
+    if not allowSpoiled and transfer.isSpoiled(detail) then
+        return false
+    end
+    return transfer.matches(itemName, itemTagsFromDetail(detail), itemQuery)
 end
 
 --- Move items from -> to matching itemQuery.
@@ -161,9 +181,8 @@ local function transferItems(from, to, itemQuery, amount, opts)
         if not moveAll and movedTotal >= amount then
             break
         end
-        if moveAll or movedTotal < amount then
-            local detail = slotDetail(source, slot, itemQuery, item.name)
-            if slotUsable(item.name, detail, itemQuery, allowSpoiled) then
+        if (moveAll or movedTotal < amount) and item and item.name then
+            if slotUsable(source, slot, item.name, itemQuery, allowSpoiled) then
                 local limit = moveAll and item.count or (amount - movedTotal)
                 local moved = 0
                 if preferPull and sink and sink.pullItems then
@@ -178,7 +197,6 @@ local function transferItems(from, to, itemQuery, amount, opts)
                         moved = moved + (tonumber(got) or 0)
                     end
                 end
-                -- Extract only: push may fail on GT food machines; pull already tried first.
                 if preferPull and moved < limit and sink and sink.pullItems then
                     local ok, got = pcall(sink.pullItems, from, slot, limit - moved)
                     if ok then
@@ -189,7 +207,7 @@ local function transferItems(from, to, itemQuery, amount, opts)
             end
         end
         n = n + 1
-        if n % 8 == 0 then
+        if n % 16 == 0 then
             sleep(0)
         end
     end
@@ -204,6 +222,7 @@ setmetatable(transfer, {
 })
 
 --- opts.allowSpoiled: count rotten food too (greenhouse bus drain).
+-- opts.stopAt: stop scanning once total reaches this (faster meat pulls).
 function transfer.countItem(invName, itemQuery, opts)
     if not invName or not peripheral.isPresent(invName) then
         return 0
@@ -213,6 +232,7 @@ function transfer.countItem(invName, itemQuery, opts)
         return 0
     end
     local allowSpoiled = opts and opts.allowSpoiled == true
+    local stopAt = opts and tonumber(opts.stopAt) or nil
     local total = 0
     local listed = inv.list()
     if not listed then
@@ -221,12 +241,14 @@ function transfer.countItem(invName, itemQuery, opts)
     local n = 0
     for rawSlot, item in pairs(listed) do
         local slot = slotNum(rawSlot)
-        local detail = slotDetail(inv, slot, itemQuery, item.name)
-        if slotUsable(item.name, detail, itemQuery, allowSpoiled) then
+        if item and item.name and slotUsable(inv, slot, item.name, itemQuery, allowSpoiled) then
             total = total + (item.count or 0)
+            if stopAt and total >= stopAt then
+                return total
+            end
         end
         n = n + 1
-        if n % 8 == 0 then
+        if n % 16 == 0 then
             sleep(0)
         end
     end
@@ -238,8 +260,21 @@ function transfer.countFromMany(sources, itemQuery, opts)
     if not sources then
         return 0
     end
+    local stopAt = opts and tonumber(opts.stopAt) or nil
     for i = 1, #sources do
-        total = total + transfer.countItem(sources[i], itemQuery, opts)
+        local left = stopAt and math.max(0, stopAt - total) or nil
+        local subOpts = opts
+        if left then
+            subOpts = {}
+            for k, v in pairs(opts) do
+                subOpts[k] = v
+            end
+            subOpts.stopAt = left
+        end
+        total = total + transfer.countItem(sources[i], itemQuery, subOpts)
+        if stopAt and total >= stopAt then
+            return total
+        end
     end
     return total
 end

@@ -14,6 +14,7 @@ local craft_monitor = {}
 local IDLE_SLEEP = 0.05
 local SKIP_SLEEP = 0.15
 local MAX_PARALLEL = 6
+local SNAP_TTL = 0.5 -- reuse stock snapshot across rapid plan ticks
 
 local function emitActivity(opts, text)
     if opts and type(opts.onActivity) == "function" then
@@ -68,9 +69,20 @@ local function unitsFromDetail(job, detail, fallbackSets)
     return per * sets
 end
 
-local function planTick(deps, index, store, opts, rootItemId, rootStill, inflight, preloadItems, preloadFluids, machineCache)
+local function planTick(deps, index, store, opts, rootItemId, rootStill, inflight, preloadItems, preloadFluids, machineCache, snapCache, forceSnap)
     local t0 = os.clock()
-    local snap = craft_stock.snapshot(store, opts, preloadItems, preloadFluids)
+    local now = os.clock()
+    local snap = snapCache.snap
+    if forceSnap
+        or not snap
+        or snapCache.rootStill ~= rootStill
+        or (now - (snapCache.t or 0)) >= SNAP_TTL
+    then
+        snap = craft_stock.snapshot(store, opts, preloadItems, preloadFluids)
+        snapCache.snap = snap
+        snapCache.t = now
+        snapCache.rootStill = rootStill
+    end
     local snapMs = craft_log.msSince(t0)
     local _need, deficit, hard = craft_plan.computeDemand(
         index,
@@ -107,6 +119,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
     local hardSticky = nil
     local inflight = {}
     local machineCache = {}
+    local snapCache = {}
     local skipStreak = 0
     local planFails = 0
 
@@ -210,7 +223,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
 
         local tickOk, tick = pcall(planTick,
             deps, index, store, opts, rootItemId, rootWant - rootCrafted,
-            inflight, preloadItems, preloadFluids, machineCache
+            inflight, preloadItems, preloadFluids, machineCache, snapCache, false
         )
         if not tickOk then
             planFails = planFails + 1
@@ -384,6 +397,7 @@ function craft_monitor.request(deps, list, rootItemId, amount, opts, logSteps)
 
                 if anyProgress then
                     skipStreak = 0
+                    snapCache.snap = nil -- stock changed; next plan must rescan
                 else
                     skipStreak = skipStreak + 1
                     sleep(softFail and 0.15 or SKIP_SLEEP)

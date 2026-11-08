@@ -42,8 +42,17 @@ function craft_stock.pullSourcesFor(store, itemName, opts)
     return list
 end
 
-function craft_stock.countAvailable(store, itemName, opts)
-    return transfer.countFromMany(craft_stock.pullSourcesFor(store, itemName, opts), itemName)
+--- Optional stopAt: stop once enough is found (faster tag/meat checks).
+function craft_stock.countAvailable(store, itemName, opts, stopAt)
+    local tOpts = nil
+    if stopAt and stopAt > 0 then
+        tOpts = { stopAt = stopAt }
+    end
+    return transfer.countFromMany(
+        craft_stock.pullSourcesFor(store, itemName, opts),
+        itemName,
+        tOpts
+    )
 end
 
 function craft_stock.countFluidAvailable(store, fluidOrTag)
@@ -136,7 +145,6 @@ function craft_stock.snapshot(store, opts, itemNames, fluidNames)
         snap._fluidDone[fluidOrTag] = true
         local have, info = craft_stock.countFluidAvailable(store, fluidOrTag)
         snap.fluids[fluidOrTag] = { have = have, info = info }
-        sleep(0)
         return have, info
     end
 
@@ -186,8 +194,8 @@ function craft_stock.findMissingInputs(recipe, store, opts, times)
                 }
             end
         else
-            -- Exact id or #tag — transfer.count handles both.
-            local have = craft_stock.countAvailable(store, input.name, opts)
+            -- Exact id or #tag — stopAt avoids full fridge scan for meat tags.
+            local have = craft_stock.countAvailable(store, input.name, opts, need)
             if have < need then
                 items[#items + 1] = {
                     name = input.name,

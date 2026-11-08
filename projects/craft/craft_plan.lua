@@ -252,8 +252,12 @@ end
 function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMachines, rootItemId)
     local candidates = {}
 
+    local nCand = 0
     for itemId, still in pairs(deficit) do
-        sleep(0) -- yield while scanning candidates
+        nCand = nCand + 1
+        if nCand % 4 == 0 then
+            sleep(0) -- yield while scanning candidates
+        end
         if not still or still <= 0 then
             -- skip
         else
@@ -265,7 +269,6 @@ function craft_plan.readyJobs(index, deficit, snap, resolveMachine, reservedMach
                 local ready = craft_stock.countCompleteSets(recipe, snap.store, snap.opts, snap)
                 if ready >= 1 then
                     local machine = resolveMachine(recipe)
-                    sleep(0)
                     local recipeKey = recipes.recipeKey(recipe)
                     local reserved = reservedMachines and reservedMachines[machine]
                     local okMachine = machine

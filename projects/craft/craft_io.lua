@@ -10,6 +10,7 @@ local craft_log = require("craft_log")
 local craft_io = {}
 
 local DEFAULT_CRAFT_WAIT = 300
+local _outFailAt = {} -- throttle out FAIL logs: key -> os.clock
 
 local function shortId(id)
     return (id and tostring(id):match("([^/]+)$")) or tostring(id or "?")
@@ -65,7 +66,7 @@ function craft_io.pullItemAmount(from, itemName, amount, store, fallbackOut, rec
                 break
             end
             if attempt < 4 then
-                sleep(0.15)
+                sleep(0.1)
             end
         end
     end
@@ -79,10 +80,16 @@ function craft_io.pullItemAmount(from, itemName, amount, store, fallbackOut, rec
     elseif dest and peripheral.isPresent(from) then
         local have = transfer.countItem(from, itemName) or 0
         if have > 0 then
-            ioLog(string.format(
-                "out FAIL %s have=%d ->%s %dms",
-                shortId(itemName), have, shortId(dest), craft_log.msSince(t0)
-            ))
+            -- Throttle: transient GT locks spam FAIL then succeed on next drain.
+            local key = tostring(from) .. ">" .. tostring(itemName)
+            local now = os.clock()
+            if not _outFailAt[key] or (now - _outFailAt[key]) >= 5 then
+                _outFailAt[key] = now
+                ioLog(string.format(
+                    "out FAIL %s have=%d ->%s %dms",
+                    shortId(itemName), have, shortId(dest), craft_log.msSince(t0)
+                ))
+            end
         end
     end
     return n
@@ -443,7 +450,7 @@ function craft_io.setAvailable(recipe, store, opts)
                 }
             end
         else
-            local have = craft_stock.countAvailable(store, input.name, opts)
+            local have = craft_stock.countAvailable(store, input.name, opts, input.count)
             if have < input.count then
                 return false, {
                     name = input.name,
