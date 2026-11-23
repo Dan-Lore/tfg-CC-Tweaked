@@ -39,26 +39,52 @@ function ae_bridge.wrap(want)
     return nil, nil
 end
 
-function ae_bridge.getItemAmount(bridge, name)
+--- Full getItem row: amount + isCraftable (AP reports craftable even at amount 0).
+-- opts.allow_list: fall back to listItems (SLOW on large ME — avoid in hot paths).
+function ae_bridge.getItemInfo(bridge, name, opts)
     if not bridge or not name then
-        return 0
+        return { amount = 0, craftable = nil }
     end
+    opts = opts or {}
     if type(bridge.getItem) == "function" then
         local ok, info = pcall(function()
             return bridge.getItem({ name = name })
         end)
         if ok and type(info) == "table" then
-            return tonumber(info.amount or info.count) or 0
+            local craftable = info.isCraftable
+            if craftable == nil then
+                craftable = info.craftable
+            end
+            if type(craftable) ~= "boolean" then
+                craftable = nil
+            end
+            return {
+                amount = tonumber(info.amount or info.count) or 0,
+                craftable = craftable,
+                fingerprint = info.fingerprint,
+                displayName = info.displayName,
+            }
         end
+    end
+    if opts.allow_list ~= true then
+        return { amount = 0, craftable = nil }
     end
     local items = callList(bridge, "listItems")
     if type(items) ~= "table" then
-        return 0
+        return { amount = 0, craftable = nil }
     end
     local found = 0
+    local craftable = nil
     local function check(it)
         if type(it) == "table" and tostring(it.name) == name then
             found = tonumber(it.amount or it.count) or 0
+            local c = it.isCraftable
+            if c == nil then
+                c = it.craftable
+            end
+            if type(c) == "boolean" then
+                craftable = c
+            end
         end
     end
     if #items > 0 then
@@ -70,7 +96,43 @@ function ae_bridge.getItemAmount(bridge, name)
             check(it)
         end
     end
-    return found
+    return { amount = found, craftable = craftable }
+end
+
+function ae_bridge.getItemAmount(bridge, name)
+    return ae_bridge.getItemInfo(bridge, name).amount
+end
+
+-- Cached listCraftableItems names (bridge object identity + TTL).
+local craftableCacheBridge = nil
+local craftableCacheAt = 0
+local craftableCacheSet = {}
+local CRAFTABLE_CACHE_S = 8
+
+local function craftableSetContains(bridge, name)
+    if craftableCacheBridge ~= bridge or (os.clock() - craftableCacheAt) > CRAFTABLE_CACHE_S then
+        craftableCacheBridge = bridge
+        craftableCacheAt = os.clock()
+        craftableCacheSet = {}
+        local list = callList(bridge, "listCraftableItems")
+        if type(list) == "table" then
+            local function add(it)
+                if type(it) == "table" and type(it.name) == "string" then
+                    craftableCacheSet[it.name] = true
+                end
+            end
+            if #list > 0 then
+                for i = 1, #list do
+                    add(list[i])
+                end
+            else
+                for _, it in pairs(list) do
+                    add(it)
+                end
+            end
+        end
+    end
+    return craftableCacheSet[name] == true
 end
 
 local function normalizeExport(ok, a, b)
@@ -137,20 +199,55 @@ function ae_bridge.isItemCraftable(bridge, name, count)
         return false, "no bridge"
     end
     count = math.max(1, math.floor(tonumber(count) or 1))
-    local filter = { name = name, count = count }
+
+    -- 1) getItem.isCraftable — works for 0-stock patterned items (e.g. gold ingot).
+    local info = ae_bridge.getItemInfo(bridge, name)
+    if info.craftable == true then
+        return true, "getItem"
+    end
+
+    -- 2) listCraftableItems cache (isItemCraftable alone is flaky on some AP builds).
+    if craftableSetContains(bridge, name) then
+        return true, "list"
+    end
+
+    -- 3) Direct API; prefer count=1 (large counts sometimes false-negative).
     if type(bridge.isItemCraftable) == "function" then
-        local ok, res, err = pcall(bridge.isItemCraftable, filter)
-        if ok then
+        local function probe(n)
+            local filter = { name = name, count = n }
+            local ok, res, err = pcall(bridge.isItemCraftable, filter)
+            if not ok then
+                return nil, tostring(res)
+            end
             if res == true then
                 return true, nil
             end
             if res == false then
                 return false, err or "not craftable"
             end
-            -- some builds return boolean as first only
             return res and true or false, err
         end
+        local ok1, why1 = probe(1)
+        if ok1 == true then
+            return true, why1
+        end
+        if count > 1 then
+            local okN, whyN = probe(count)
+            if okN == true then
+                return true, whyN
+            end
+            return false, whyN or why1 or "not craftable"
+        end
+        if ok1 == false then
+            return false, why1 or "not craftable"
+        end
     end
+
+    -- Explicit false from getItem beats unverified attempt.
+    if info.craftable == false then
+        return false, "not craftable"
+    end
+
     if type(bridge.craftItem) ~= "function" then
         return false, "no craftItem"
     end
@@ -277,28 +374,199 @@ function ae_bridge.craftingAmount(bridge, name)
     return 0, true
 end
 
---- Request craft. Returns ok, errMessage.
-function ae_bridge.craftItem(bridge, name, count)
-    if not bridge or type(bridge.craftItem) ~= "function" then
-        return false, "no craftItem"
+local function ingestItemRow(into, it)
+    if type(it) ~= "table" or type(it.name) ~= "string" then
+        return
     end
-    count = math.max(1, math.floor(tonumber(count) or 1))
-    local filter = { name = name, count = count }
-    local ok, a, b = pcall(bridge.craftItem, filter)
-    if not ok then
-        return false, tostring(a)
+    local craftable = it.isCraftable
+    if craftable == nil then
+        craftable = it.craftable
     end
+    if type(craftable) ~= "boolean" then
+        craftable = nil
+    end
+    into[it.name] = {
+        amount = tonumber(it.amount or it.count) or 0,
+        craftable = craftable,
+    }
+end
+
+--- Watchlist ME pass: per-id getItem + one crafting-tasks list.
+-- Never calls listItems (full ME dump is multi-second on large nets and was the poll stall).
+-- Returns { amount, craftable, crafting, craftKnown, ms, mode }.
+function ae_bridge.snapshot(bridge, names)
+    local t0 = os.clock()
+    local amount, craftable, crafting, craftKnown = {}, {}, {}, {}
+    names = names or {}
+    for i = 1, #names do
+        local n = names[i]
+        amount[n] = 0
+        crafting[n] = 0
+        craftKnown[n] = true
+    end
+
+    -- getItem only — ~N bridge calls for the watchlist, not the whole network.
+    for i = 1, #names do
+        local n = names[i]
+        local info = ae_bridge.getItemInfo(bridge, n)
+        amount[n] = info.amount
+        craftable[n] = info.craftable
+    end
+
+    local tasks = callList(bridge, "getCraftingTasks")
+    if type(tasks) ~= "table" then
+        tasks = callList(bridge, "listCraftingJobs")
+    end
+    if type(tasks) == "table" then
+        local saw = {}
+        local function consider(job)
+            local n = filterName(job)
+            if not n then
+                return
+            end
+            saw[n] = true
+            local c = filterCount(job)
+            if c > 0 then
+                crafting[n] = (tonumber(crafting[n]) or 0) + c
+            end
+        end
+        if #tasks > 0 then
+            for i = 1, #tasks do
+                consider(tasks[i])
+            end
+        else
+            for _, job in pairs(tasks) do
+                consider(job)
+            end
+        end
+        for i = 1, #names do
+            local n = names[i]
+            if saw[n] and (tonumber(crafting[n]) or 0) < 1 then
+                craftKnown[n] = false
+            end
+        end
+    else
+        for i = 1, #names do
+            local n = names[i]
+            if ae_bridge.isItemCrafting(bridge, n) then
+                craftKnown[n] = false
+            end
+        end
+    end
+
+    return {
+        amount = amount,
+        craftable = craftable,
+        crafting = crafting,
+        craftKnown = craftKnown,
+        ms = math.floor((os.clock() - t0) * 1000 + 0.5),
+        mode = "getItem",
+    }
+end
+
+--- Parse AP craftItem return. Nil alone is NOT success (was a false-positive that
+-- showed «заказ AE» with крафт=0 while no CPU job existed).
+local function interpretCraftReturn(a, b)
     if a == false then
         return false, b or "craft failed"
     end
-    if a == nil and type(b) == "string" then
-        return false, b
+    if a == nil then
+        if type(b) == "string" and b ~= "" then
+            return false, b
+        end
+        return false, "craft returned nil"
     end
-    -- 0.8 may return a job table; treat as success.
-    if type(a) == "table" or a == true or a == nil then
+    if a == true then
         return true, nil
     end
-    return true, nil
+    -- 0.8+ may return a job table; some builds return a positive count.
+    if type(a) == "table" then
+        return true, nil
+    end
+    if type(a) == "number" and a > 0 then
+        return true, nil
+    end
+    return false, tostring(b or a or "craft failed")
+end
+
+--- True if AE already has an active job for name (opaque or counted).
+function ae_bridge.hasCraftJob(bridge, name)
+    if not bridge or not name then
+        return false
+    end
+    if ae_bridge.isItemCrafting(bridge, name) then
+        return true
+    end
+    local amt, known = ae_bridge.craftingAmount(bridge, name)
+    if (tonumber(amt) or 0) > 0 then
+        return true
+    end
+    if known == false then
+        return true
+    end
+    return false
+end
+
+--- Request craft. Returns ok, errMessage, scheduledCount.
+-- Schedules smaller chunks first (multi-step AE trees often reject huge first requests).
+-- After a positive API return, verifies a craft job actually appeared.
+function ae_bridge.craftItem(bridge, name, count)
+    if not bridge or type(bridge.craftItem) ~= "function" then
+        return false, "no craftItem", 0
+    end
+    count = math.max(1, math.floor(tonumber(count) or 1))
+
+    local function once(n)
+        local filter = { name = name, count = n }
+        local ok, a, b = pcall(bridge.craftItem, filter)
+        if not ok then
+            return false, tostring(a)
+        end
+        return interpretCraftReturn(a, b)
+    end
+
+    -- Prefer a modest first job so multi-step patterns (plate ← gem ← ore) can start.
+    local tryOrder = {}
+    if count > 64 then
+        tryOrder[#tryOrder + 1] = 64
+    end
+    if count > 16 and count ~= 64 then
+        tryOrder[#tryOrder + 1] = 16
+    end
+    tryOrder[#tryOrder + 1] = count
+    if count > 1 then
+        tryOrder[#tryOrder + 1] = 1
+    end
+    -- Dedup while preserving order.
+    local seen, order = {}, {}
+    for i = 1, #tryOrder do
+        local n = tryOrder[i]
+        if not seen[n] then
+            seen[n] = true
+            order[#order + 1] = n
+        end
+    end
+
+    local err = "craft failed"
+    for i = 1, #order do
+        local n = order[i]
+        local ok, why = once(n)
+        if ok then
+            -- AP sometimes returns true without scheduling — confirm a job exists.
+            if ae_bridge.hasCraftJob(bridge, name) then
+                return true, nil, n
+            end
+            -- Brief yield then re-check (CPU may take a tick to register).
+            sleep(0)
+            if ae_bridge.hasCraftJob(bridge, name) then
+                return true, nil, n
+            end
+            err = "API ok, no AE job"
+        else
+            err = why or err
+        end
+    end
+    return false, err, 0
 end
 
 return ae_bridge

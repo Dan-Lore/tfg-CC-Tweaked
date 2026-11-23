@@ -37,11 +37,12 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
    - **WARN** if no ALARM but any `moon < target`
    - **OK** → idle
 3. Build a shot package from deficits. Within a zone, cfg order. In **ALARM**, alarm items load before warn items of the same shot. **WARN** sends warn deficits only.
-4. Missing on Earth: check craftable → `craftItem`; else status «Нет в AE». Amounts already in the buffer, loaders, or an active AE craft job (`isItemCrafting` / craft-task list) are not crafted again. A short local reserve covers the gap before the job appears on the bridge. Monitor row status: `Крафт (x)` / `Загрузка (y)` / `Отправлено (y)` on cooldown.
+4. Missing on Earth: try `craftItem` on the **final** item (AE expands multi-step trees itself — we do not order intermediates). Prefer chunk 64→16→full→1; API success must show a real CPU job (`hasCraftJob`), else treat as fail (AP often returns true/nil with no job). `getItem.isCraftable=false` is not a hard skip. In-flight jobs + local reserve are not double-ordered. Row status: `Крафт` / `Загрузка` / `Отправлено`.
 5. After the first craft probe, **unobtainable** ids are dropped from the shot. If nothing remains, **no craft-wait / no launch prep** — idle + status `не шлём (нет в AE): …`.
-6. During craft-wait (**ALARM 60 s** / **WARN 120 s**) only for obtainable items: export AE → loaders; re-request craft as needed. Title stays short (`ожидание` / `загрузка`); timers and `ждём:` / skip notes go to the **2 sys status lines**.
+6. During craft-wait (**ALARM 60 s** / **WARN 120 s**, or **3 s** if no AE jobs) only for obtainable items: export AE → loaders; re-request craft as needed. Title stays short (`сборка` / `загрузка`); status lines say `крафт AE` / `сборка пакета` / `выгрузка` / `нет на Земле` — never vague «ждём AE» when nothing was ordered. Debug ring (4 lines) under the table shows snap/export/craft timings.
 7. **Fire** when the obtainable shot package sits in the loaders, or when every loader is cargo-full. `загрузка` title only when loaders actually hold cargo. If the package cannot be finished after the wait, return to poll with a status note.
 8. Pulse relay → `cooldown | 80`. Flight is 60 s, so the next poll sees the delivery. No in-flight reserve. A failed relay pulse does not start the cooldown.
+9. **Poll UX**: one `ae_bridge.snapshot` = `getItem`×watchlist + one crafting-tasks list (never full `listItems` — that stalled large ME nets). Rows apply atomically. Shot loop refreshes staged every 0.5 s; full AE at most every 2 s. Cfg hot-reload throttled to 2 s. `requestCrafts` reuses the snapshot (no N×`craftingAmount`).
 
 ## Watchlist defaults (`moon_supply_E_ctrl.cfg` only)
 
@@ -76,7 +77,7 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 
 - `config.lua` — Earth watchlist + Moon hardware (`bridge` / `modem`) via `cfg_pipe`
 - `protocol.lua` — ender rednet stock query
-- `ae_bridge.lua` — getItem / exportItem / craftItem / craftable (AP 0.7)
+- `ae_bridge.lua` — getItem / exportItem / craftItem / craftable / `snapshot` (AP 0.7)
 - `railgun_hw.lua` — loader full + relay pulse (from legacy `railgun`)
 - `discover.lua` — bridge, modem, monitor, buffer, loaders, relay
 - `planner.lua` — ALARM/WARN, package, craft-wait policy

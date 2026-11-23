@@ -230,6 +230,132 @@ A.suite("moon_supply ae craft cover", {
             A.eq(known, true)
         end,
     },
+    {
+        name = "zero-stock patterned item is craftable via getItem",
+        fn = function()
+            local jobs = {}
+            local bridge = {
+                getItem = function(filter)
+                    if filter and filter.name == "minecraft:gold_ingot" then
+                        return { name = "minecraft:gold_ingot", amount = 0, isCraftable = true }
+                    end
+                    if filter and filter.name == "gtceu:diamond_plate" then
+                        return { name = "gtceu:diamond_plate", amount = 0, isCraftable = false }
+                    end
+                    return nil
+                end,
+                isItemCraftable = function()
+                    return false, "not craftable"
+                end,
+                listCraftableItems = function()
+                    return {}
+                end,
+                isItemCrafting = function(filter)
+                    return jobs[filter and filter.name] == true
+                end,
+                getCraftingTasks = function()
+                    local t = {}
+                    for name, on in pairs(jobs) do
+                        if on then
+                            t[#t + 1] = { name = name, count = 64 }
+                        end
+                    end
+                    return t
+                end,
+                craftItem = function(filter)
+                    if filter.name == "minecraft:gold_ingot" then
+                        jobs[filter.name] = true
+                        return true
+                    end
+                    -- Fake AP quirk: returns true but schedules nothing.
+                    if filter.name == "gtceu:diamond_plate" then
+                        return true
+                    end
+                    return false, "not craftable"
+                end,
+            }
+            local okGold, whyGold = ae_bridge.isItemCraftable(bridge, "minecraft:gold_ingot", 800)
+            A.eq(okGold, true)
+            A.eq(whyGold, "getItem")
+            local okDia, whyDia = ae_bridge.isItemCraftable(bridge, "gtceu:diamond_plate", 100)
+            A.eq(okDia, false)
+            A.eq(whyDia, "not craftable")
+            local crafted, err, n = ae_bridge.craftItem(bridge, "minecraft:gold_ingot", 800)
+            A.eq(crafted, true)
+            A.isNil(err)
+            A.eq(n, 64)
+            local bad, badErr, badN = ae_bridge.craftItem(bridge, "gtceu:diamond_plate", 100)
+            A.eq(bad, false)
+            A.eq(badN, 0)
+            A.truthy(tostring(badErr or ""):find("no AE job", 1, true)
+                or tostring(badErr or ""):find("nil", 1, true)
+                or badErr ~= nil)
+        end,
+    },
+    {
+        name = "craftItem nil return is failure",
+        fn = function()
+            local bridge = {
+                craftItem = function()
+                    return nil
+                end,
+                isItemCrafting = function()
+                    return false
+                end,
+                getCraftingTasks = function()
+                    return {}
+                end,
+            }
+            local ok, err, n = ae_bridge.craftItem(bridge, "a", 10)
+            A.eq(ok, false)
+            A.eq(n, 0)
+            A.truthy(err)
+        end,
+    },
+    {
+        name = "snapshot uses getItem not listItems",
+        fn = function()
+            local getCalls, listCalls, taskCalls = 0, 0, 0
+            local bridge = {
+                getItem = function(filter)
+                    getCalls = getCalls + 1
+                    if filter.name == "a" then
+                        return { name = "a", amount = 10, isCraftable = true }
+                    end
+                    if filter.name == "b" then
+                        return { name = "b", amount = 0, isCraftable = false }
+                    end
+                    return nil
+                end,
+                listItems = function()
+                    listCalls = listCalls + 1
+                    return {
+                        { name = "a", amount = 999, isCraftable = true },
+                    }
+                end,
+                getCraftingTasks = function()
+                    taskCalls = taskCalls + 1
+                    return {
+                        { name = "a", count = 4 },
+                    }
+                end,
+            }
+            local snap = ae_bridge.snapshot(bridge, { "a", "b", "c" })
+            A.eq(getCalls, 3)
+            A.eq(listCalls, 0)
+            A.eq(taskCalls, 1)
+            A.eq(snap.amount.a, 10)
+            A.eq(snap.amount.b, 0)
+            A.eq(snap.amount.c, 0)
+            A.eq(snap.craftable.a, true)
+            A.eq(snap.craftable.b, false)
+            A.eq(snap.crafting.a, 4)
+            A.eq(snap.crafting.b, 0)
+            A.eq(snap.craftKnown.a, true)
+            A.eq(snap.craftKnown.c, true)
+            A.eq(snap.mode, "getItem")
+        end,
+    },
 })
 
 local monitor_ui = require("monitor_ui")
@@ -269,8 +395,16 @@ A.suite("moon_supply monitor", {
             t, c = monitor_ui.statusCell({ staged = 12 }, "cooldown")
             A.eq(t, "Отправлено (12)")
             A.eq(c, colors.yellow)
+            -- After cooldown ends, sent_freeze keeps «Отправлено» (not «Загрузка»).
+            t, c = monitor_ui.statusCell({ staged = 12 }, "poll", { sent_freeze = true })
+            A.eq(t, "Отправлено (12)")
+            A.eq(c, colors.yellow)
             t, c = monitor_ui.statusCell({ crafting = 7 })
             A.eq(t, "Крафт (7)")
+            A.eq(c, colors.yellow)
+            -- Active craft must not be hidden by partial loader fill.
+            t, c = monitor_ui.statusCell({ staged = 100, crafting = 50 })
+            A.eq(t, "Крафт (50)")
             A.eq(c, colors.yellow)
             t, c = monitor_ui.statusCell({ ae = "no" })
             A.eq(t, "Нет в AE")
@@ -327,14 +461,11 @@ A.suite("moon_supply monitor", {
             A.eq(monitor_ui.itemLabel("gtceu:hv_robot_arm"), "роборука HV")
             A.truthy(lines[1]:find("снабжение", 1, true))
             A.truthy(lines[1]:find("тревога", 1, true))
-            A.truthy(lines[1]:find("ожидание", 1, true))
+            A.truthy(lines[1]:find("сборка", 1, true))
             A.truthy(not lines[1]:find("слиток алюминия", 1, true), "wait_item not in title")
             A.truthy(lines[2]:find("к запуску", 1, true))
-            A.truthy(lines[3]:find("ожидание AE", 1, true) or lines[3]:find("ждём", 1, true), "status line 1")
-            A.truthy(
-                lines[4]:find("ждём", 1, true) or lines[4]:find("луна не в сети", 1, true),
-                "status line 2 filled (fixed band)"
-            )
+            A.truthy(lines[3]:find("сборка пакета", 1, true), "status line 1")
+            A.truthy(lines[4]:find("луна не в сети", 1, true), "status line 2 = error")
             local head = lines[5]
             A.truthy(head:find("Луна", 1, true))
             A.truthy(head:find("Предмет", 1, true))

@@ -272,20 +272,28 @@ function monitor_ui.phasePulseSuffix(phase, clock)
 end
 
 --- Status cell text + color from crafting / staged / AE availability.
--- phase "cooldown" (пауза): staged cargo was fired → «Отправлено», same yellow.
-function monitor_ui.statusCell(row, phase)
+-- Craft wins over staged so a partial loader fill does not hide an active AE job.
+-- phase "cooldown" or opts.sent_freeze: staged cargo was fired → «Отправлено».
+-- opts may be a boolean (legacy sent_freeze) or { sent_freeze = true }.
+function monitor_ui.statusCell(row, phase, opts)
     row = row or {}
+    if type(opts) == "boolean" then
+        opts = { sent_freeze = opts }
+    else
+        opts = opts or {}
+    end
     local staged = math.max(0, math.floor(tonumber(row.staged) or 0))
     local crafting = math.max(0, math.floor(tonumber(row.crafting) or 0))
     local ae = tostring(row.ae or row.craft or "")
-    if staged > 0 then
-        if phase == "cooldown" then
-            return ("Отправлено (%d)"):format(staged), colors.yellow
-        end
-        return ("Загрузка (%d)"):format(staged), colors.yellow
+    local sent = phase == "cooldown" or opts.sent_freeze == true
+    if sent and staged > 0 then
+        return ("Отправлено (%d)"):format(staged), colors.yellow
     end
     if crafting > 0 then
         return ("Крафт (%d)"):format(crafting), colors.yellow
+    end
+    if staged > 0 then
+        return ("Загрузка (%d)"):format(staged), colors.yellow
     end
     if ae == "no" or ae == "fail" then
         return "Нет в AE", colors.red
@@ -401,7 +409,7 @@ function monitor_ui.draw(mon, state)
     -- Title stays short. Craft timer / blockers / skip notes live in the sys status band.
     local title = { { "снабжение [" .. mode .. "] ", colors.white } }
     if phaseKey == "craft_wait" then
-        title[#title + 1] = { "ожидание", colors.yellow }
+        title[#title + 1] = { "сборка", colors.yellow }
         title[#title + 1] = { monitor_ui.phasePulseSuffix("poll", state.clock), colors.lightGray }
     elseif phaseKey == "loading" then
         title[#title + 1] = { "загрузка", colors.yellow }
@@ -456,13 +464,11 @@ function monitor_ui.draw(mon, state)
             pushMsg(state.messages[i], true)
         end
     end
-    -- craft_wait timer also mirrored here when controller did not push messages yet
+    -- craft_wait timer mirrored only when controller did not push messages yet
     if phaseKey == "craft_wait" and state.craft_left and #msgs < SYS_LINES then
-        pushMsg(("ожидание AE %d с"):format(state.craft_left), true)
+        pushMsg(("сборка пакета %d с"):format(state.craft_left), true)
     end
-    if state.wait_item and tostring(state.wait_item) ~= "" and #msgs < SYS_LINES then
-        pushMsg("ждём: " .. monitor_ui.itemLabel(state.wait_item), true)
-    end
+    -- Do not invent «ждём AE» here — controller owns wait wording via messages.
     pushMsg(state.error, false)
     for i = 1, SYS_LINES do
         local ySys = SYS_Y0 + i - 1
@@ -482,6 +488,13 @@ function monitor_ui.draw(mon, state)
 
     -- Caller owns order (cfg skeleton sorted once). Do not re-sort every paint.
     local rows = state.rows or {}
+    local debugLines = state.debug or {}
+    local debugN = 0
+    if type(debugLines) == "table" then
+        debugN = math.min(#debugLines, math.max(0, h - (SYS_Y0 + SYS_LINES + 2)))
+    end
+    local tableBottom = h - debugN -- last debugN rows reserved under the table
+
     local labels, moons, targets, earths, statuses, stockColors, statusColors =
         {}, {}, {}, {}, {}, {}, {}
     for i = 1, #rows do
@@ -494,7 +507,7 @@ function monitor_ui.draw(mon, state)
         end
         targets[i] = fmtNum(r.target)
         earths[i] = fmtNum(r.earth)
-        local st, sc = monitor_ui.statusCell(r, phaseKey)
+        local st, sc = monitor_ui.statusCell(r, phaseKey, { sent_freeze = state.sent_freeze == true })
         statuses[i] = st
         statusColors[i] = sc
         stockColors[i] = monitor_ui.stockColor(r.moon, r.target, r.zone)
@@ -568,7 +581,7 @@ function monitor_ui.draw(mon, state)
     y = y + 1
 
     for i = 1, #rows do
-        if y > h then
+        if y > tableBottom then
             break
         end
         local sc = stockColors[i]
@@ -579,9 +592,19 @@ function monitor_ui.draw(mon, state)
         )
         y = y + 1
     end
-    while y <= h do
+    while y <= tableBottom do
         blankLine(y)
         y = y + 1
+    end
+
+    -- Debug ring under the table (timing / shot decisions).
+    if debugN > 0 then
+        local start = #debugLines - debugN + 1
+        for i = 0, debugN - 1 do
+            local yy = tableBottom + 1 + i
+            local text = tostring(debugLines[start + i] or "")
+            writeParts(yy, { { text, colors.gray } })
+        end
     end
 end
 
