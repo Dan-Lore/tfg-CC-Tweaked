@@ -287,7 +287,7 @@ A.suite("moon_supply monitor", {
                 { name = "tfg:iv_universal_circuit" },
                 { name = "gtceu:hv_robot_arm" },
                 { name = "tfg:lv_universal_circuit" },
-                { name = "gtceu:gold_ingot" },
+                { name = "tfc:metal/ingot/gold" },
                 { name = "gtceu:mv_robot_arm" },
                 { name = "gtceu:aluminium_ingot" },
                 { name = "minecraft:redstone" },
@@ -303,7 +303,7 @@ A.suite("moon_supply monitor", {
             A.eq(names[3], "gtceu:mv_robot_arm")
             A.eq(names[4], "gtceu:hv_robot_arm")
             A.eq(names[5], "gtceu:aluminium_ingot")
-            A.eq(names[6], "gtceu:gold_ingot")
+            A.eq(names[6], "tfc:metal/ingot/gold")
             A.eq(names[7], "gtceu:silicon_plate")
             A.eq(names[8], "gtceu:diamond_plate")
             A.eq(names[9], "minecraft:redstone")

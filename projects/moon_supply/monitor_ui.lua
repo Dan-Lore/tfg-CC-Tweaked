@@ -22,7 +22,7 @@ local NAMES = {
     ["gtceu:exquisite_certus_quartz_gem"] = "сертис",
     ["gtceu:diamond_plate"] = "алмаз пл.",
     ["gtceu:silicon_plate"] = "кремний пл.",
-    ["gtceu:gold_ingot"] = "золото",
+    ["tfc:metal/ingot/gold"] = "золото",
     ["gtceu:dense_silicon_plate"] = "плотн. кремний",
     ["tfg:silica_aerogel"] = "аэрогель",
 }
@@ -40,7 +40,7 @@ local ORDER = {
     ["gtceu:random_access_memory"] = { 2, 5 },
     ["gtceu:aluminium_ingot"] = { 3, 1 },
     ["gtceu:stainless_steel_ingot"] = { 3, 2 },
-    ["gtceu:gold_ingot"] = { 3, 3 },
+    ["tfc:metal/ingot/gold"] = { 3, 3 },
     ["gtceu:polyethylene_foil"] = { 4, 1 },
     ["gtceu:polyvinyl_chloride_foil"] = { 4, 2 },
     ["gtceu:silicon_plate"] = { 5, 1 },
@@ -93,6 +93,8 @@ local ERROR_RU = {
     ["no loaders"] = "нет лоадеров",
     ["no relay"] = "нет реле",
     ["no relay pulse"] = "реле не сработало",
+    ["ITEM_NOT_FOUND"] = "нет такого предмета",
+    ["not craftable"] = "нельзя скрафтить",
 }
 
 local function ulen(s)
@@ -195,6 +197,14 @@ local function errorLabel(err)
     if buffer then
         return "буфер пропал: " .. buffer
     end
+    -- "золото: ITEM_NOT_FOUND" → "золото: нет такого предмета"
+    local prefix, code = err:match("^(.+): ([%w_]+)$")
+    if prefix and code and ERROR_RU[code] then
+        return prefix .. ": " .. ERROR_RU[code]
+    end
+    if err:find("ITEM_NOT_FOUND", 1, true) then
+        return err:gsub("ITEM_NOT_FOUND", ERROR_RU.ITEM_NOT_FOUND)
+    end
     return err
 end
 
@@ -266,6 +276,13 @@ function monitor_ui.wrap(name)
     if not mon or type(mon.setCursorPos) ~= "function" then
         return nil
     end
+    -- Scale once: setTextScale every frame causes visible flicker.
+    if mon._moonSupplyScale ~= 0.5 then
+        pcall(function()
+            mon.setTextScale(0.5)
+        end)
+        mon._moonSupplyScale = 0.5
+    end
     return mon
 end
 
@@ -276,11 +293,12 @@ function monitor_ui.draw(mon, state)
         return
     end
     state = state or {}
-    pcall(function()
-        mon.setTextScale(0.5)
-    end)
-    mon.setBackgroundColor(colors.black)
-    mon.clear()
+    if mon._moonSupplyScale ~= 0.5 then
+        pcall(function()
+            mon.setTextScale(0.5)
+        end)
+        mon._moonSupplyScale = 0.5
+    end
     local w, h = mon.getSize()
     w = tonumber(w) or 0
     h = tonumber(h) or 0
@@ -298,6 +316,20 @@ function monitor_ui.draw(mon, state)
         return x + ulen(s)
     end
 
+    -- Overwrite in place (no mon.clear) — clears remainder of the line to kill flicker.
+    local function finishLine(x, y)
+        if y < 1 or y > h or x > w then
+            return
+        end
+        if x < 1 then
+            x = 1
+        end
+        mon.setCursorPos(x, y)
+        mon.setBackgroundColor(colors.black)
+        mon.setTextColor(colors.black)
+        mon.write(string.rep(" ", w - x + 1))
+    end
+
     local function writeParts(y, parts)
         local x = 1
         for i = 1, #parts do
@@ -307,6 +339,7 @@ function monitor_ui.draw(mon, state)
                 break
             end
         end
+        finishLine(x, y)
     end
 
     local modeKey = state.mode or "OK"
@@ -402,10 +435,15 @@ function monitor_ui.draw(mon, state)
         x = writeSeg(x, y, " ", cTarget)
         x = writeSeg(x, y, rjust(earth, earthW), cEarth)
         x = writeSeg(x, y, " ", cEarth)
-        writeSeg(x, y, ljust(status, statusW), cStatus)
+        x = writeSeg(x, y, ljust(status, statusW), cStatus)
+        finishLine(x, y)
     end
 
     local y = err and 4 or 3
+    if not err then
+        -- Clear stale error line when the fault goes away.
+        finishLine(1, 3)
+    end
     writeProps(
         y,
         headName, headMoon, headTarget, headEarth, headStatus,
@@ -427,6 +465,10 @@ function monitor_ui.draw(mon, state)
         if i % 8 == 0 then
             sleep(0)
         end
+    end
+    while y <= h do
+        finishLine(1, y)
+        y = y + 1
     end
 end
 

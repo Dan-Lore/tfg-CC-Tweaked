@@ -226,6 +226,8 @@ local function snapshotLoaders()
     end
 end
 
+local lastPaintKey = nil
+
 --- Paint from shared state only (no AE). Safe to call from the UI coroutine.
 local function drawUi()
     if not mon then
@@ -236,9 +238,34 @@ local function drawUi()
     if uiTimerEnd then
         local left = uiTimerEnd - os.clock()
         if left > 0 then
-            craftLeft = left
+            craftLeft = math.floor(left + 0.5)
         end
     end
+    local key = table.concat({
+        tostring(phase),
+        tostring(mode),
+        tostring(lastError),
+        tostring(uiLoadersFull),
+        tostring(uiLoadersTotal),
+        tostring(craftLeft or "-"),
+        tostring(craftTotal),
+        tostring(stagedTotal),
+        tostring(#uiRows),
+    }, "|")
+    for i = 1, #uiRows do
+        local r = uiRows[i]
+        key = key .. ";" .. tostring(r.name)
+            .. "," .. tostring(r.moon)
+            .. "," .. tostring(r.earth)
+            .. "," .. tostring(r.crafting)
+            .. "," .. tostring(r.staged)
+            .. "," .. tostring(r.ae or "-")
+            .. "," .. tostring(r.zone)
+    end
+    if key == lastPaintKey then
+        return
+    end
+    lastPaintKey = key
     monitor_ui.draw(mon, {
         phase = phase,
         mode = mode,
@@ -279,7 +306,10 @@ local function requestCrafts(wants, order, force)
                     local okCraft, why = ae_bridge.isItemCraftable(bridge, name, missing)
                     if not okCraft then
                         craftStatus[name] = "no"
-                        if why and why ~= "unverified" then
+                        -- Wrong id / no pattern: status column only (no orange banner spam).
+                        local quiet = why == "unverified" or why == "ITEM_NOT_FOUND"
+                            or why == "not craftable" or why == nil
+                        if not quiet then
                             setError(shortErr(name, why))
                         end
                     else
@@ -288,7 +318,10 @@ local function requestCrafts(wants, order, force)
                         if ok then
                             noteCraftPending(name, missing, now)
                         else
-                            setError(shortErr(name, err))
+                            local quiet = err == "ITEM_NOT_FOUND" or err == "not craftable"
+                            if not quiet then
+                                setError(shortErr(name, err))
+                            end
                         end
                     end
                 else

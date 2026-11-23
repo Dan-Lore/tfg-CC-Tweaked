@@ -28,7 +28,7 @@ local DEFAULT_ITEMS = {
     { name = "gtceu:exquisite_certus_quartz_gem", target = 512 },
     { name = "gtceu:diamond_plate", target = 1024 },
     { name = "gtceu:silicon_plate", target = 1024 },
-    { name = "gtceu:gold_ingot", target = 1024 },
+    { name = "tfc:metal/ingot/gold", target = 1024 },
     { name = "gtceu:dense_silicon_plate", target = 128 },
     { name = "tfg:silica_aerogel", target = 1024 },
 }

@@ -66,7 +66,7 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 | `gtceu:exquisite_certus_quartz_gem` | 512 |
 | `gtceu:diamond_plate` | 1024 |
 | `gtceu:silicon_plate` | 1024 |
-| `gtceu:gold_ingot` | 1024 |
+| `tfc:metal/ingot/gold` | 1024 |
 | `gtceu:dense_silicon_plate` | 128 |
 | `tfg:silica_aerogel` | 1024 |
 
