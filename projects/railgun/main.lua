@@ -228,16 +228,18 @@ local function tick()
     if not allFull(net.loaders) then
         settleSince = nil
         if sample then
-            setStatus(("waiting %d/%d full (%s cargo=%d empty=%d size=%d)"):format(
+            local idx = tostring(sample.name):match("_(%d+)$") or "?"
+            -- Two short lines (CC terminal wraps long English keys unreadably).
+            setStatus(("ждём %d/%d полных\n#%s занято %d, пусто %d / %d"):format(
                 full,
                 total,
-                tostring(sample.name):gsub("^.*:", ""),
+                idx,
                 sample.cargo,
                 sample.empty,
                 sample.size
             ))
         else
-            setStatus(("waiting %d/%d full"):format(full, total))
+            setStatus(("ждём %d/%d полных"):format(full, total))
         end
         return
     end

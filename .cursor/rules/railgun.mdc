@@ -5,6 +5,8 @@ globs: projects/railgun/**
 
 # railgun
 
+**Legacy / manual:** fire-when-full only. For Earth→Moon AE supply use **`moon_supply`** (`earth` entry) — it owns fill + commanded fire on the same Sender.
+
 Dedicated CC computer: watch one Interplanetary Railgun **Sender**’s HV input loaders; when they are slot-full, wait a settle window, then pulse `redstone_relay` so the Sender **Redstone Rule** launches. Fill / ammo / EU / routing stay manual.
 
 ## Layout
