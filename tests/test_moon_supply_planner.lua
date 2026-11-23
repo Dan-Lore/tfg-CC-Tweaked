@@ -109,6 +109,46 @@ A.suite("moon_supply planner", {
             A.eq(planner.shouldFire(true, false), true)
             A.eq(planner.shouldFire(false, true), true)
             A.eq(planner.shouldFire(false, false), false)
+            -- Still something to load → do not fire (unless loaders are full).
+            A.eq(planner.shouldFire(true, false, true), false)
+            A.eq(planner.shouldFire(false, false, true), false)
+            A.eq(planner.shouldFire(false, true, true), true)
+        end,
+    },
+    {
+        name = "mergePackage expands mid-shot deficits",
+        fn = function()
+            local rows = {
+                { name = "diamond", deficit = 128, zone = planner.ZONE_WARN },
+                { name = "gold", deficit = 40, zone = planner.ZONE_WARN },
+            }
+            local wants, order = planner.packageWants({
+                { name = "diamond", deficit = 128, zone = planner.ZONE_WARN },
+            }, planner.ZONE_WARN)
+            A.eq(#order, 1)
+            A.eq(wants.diamond, 128)
+            local w2, o2 = planner.mergePackage(wants, order, rows, planner.ZONE_WARN)
+            A.eq(w2.diamond, 128)
+            A.eq(w2.gold, 40)
+            A.eq(#o2, 2)
+            A.eq(o2[2], "gold")
+            -- Never shrink an in-flight want.
+            local w3, _ = planner.mergePackage(
+                { diamond = 200 },
+                { "diamond" },
+                { { name = "diamond", deficit = 50, zone = planner.ZONE_WARN } },
+                planner.ZONE_WARN
+            )
+            A.eq(w3.diamond, 200)
+        end,
+    },
+    {
+        name = "effectiveCraft clamps finished output",
+        fn = function()
+            A.eq(planner.effectiveCraft(121, 128, 115, 18), 0)
+            A.eq(planner.effectiveCraft(121, 128, 0, 61), 67)
+            A.eq(planner.effectiveCraft(50, 0, 10, 10), 50)
+            A.eq(planner.effectiveCraft(10, 100, 0, 0), 10)
         end,
     },
     {
@@ -403,10 +443,13 @@ A.suite("moon_supply monitor", {
             A.eq(c, colors.yellow)
             t, c = monitor_ui.statusCell({ crafting = 7 })
             A.eq(t, "Крафт (7)")
-            A.eq(c, colors.yellow)
-            -- Active craft must not be hidden by partial loader fill.
-            t, c = monitor_ui.statusCell({ staged = 100, crafting = 50 })
-            A.eq(t, "Крафт (50)")
+            A.eq(c, colors.orange)
+            -- Both craft + loaded: blink by clock second.
+            t, c = monitor_ui.statusCell({ staged = 70, crafting = 60 }, nil, { clock = 0 })
+            A.eq(t, "Крафт (60)")
+            A.eq(c, colors.orange)
+            t, c = monitor_ui.statusCell({ staged = 70, crafting = 60 }, nil, { clock = 1 })
+            A.eq(t, "Загружено (70)")
             A.eq(c, colors.yellow)
             t, c = monitor_ui.statusCell({ ae = "no" })
             A.eq(t, "Нет в AE")

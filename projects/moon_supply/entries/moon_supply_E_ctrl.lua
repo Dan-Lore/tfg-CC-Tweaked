@@ -48,12 +48,16 @@ local uiDebugLog = {} -- ring under the table
 local packageOrder = nil -- active shot item ids (aeWatch focuses these)
 local packageWants = nil
 local aeWatchGeneration = 0 -- bumped so watch loop drops stale work
+local lastMoonStocks = nil -- shared with moonWatchLoop (control never blocks on rednet)
+local lastMoonAt = 0
 local CRAFT_PENDING_S = 180
 local CRAFT_GRACE_S = 15
 local UI_PAINT_S = 0.15
 local CFG_RELOAD_S = 2
-local AE_FULL_S = 2
-local AE_WATCH_S = 0.6
+local AE_FULL_S = 2.5
+local AE_WATCH_S = 0.75
+local AE_WATCH_IDLE_S = 1.25
+local MOON_WATCH_S = 2
 local CRAFT_RETRY_S = 2
 local DEBUG_LOG_N = 4
 
@@ -407,6 +411,7 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
             p.zone = a.zone
         end
         if snap then
+            local earthAmt = tonumber(snap.amount[name]) or 0
             local craftingAmt = tonumber(snap.crafting[name]) or 0
             local craftKnown = snap.craftKnown[name] ~= false
             local reserved = pendingCover(name, now, craftingAmt, craftKnown)
@@ -414,8 +419,18 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
             if not craftKnown and craftingAmt < 1 then
                 craftingAmt = 1
             end
+            -- Clamp craft against earth+staged so finished AE output is not shown twice
+            -- (Крафт 121 while already in Земля/Загружено).
+            local wantClamp = 0
+            if packageWants and packageWants[name] then
+                wantClamp = tonumber(packageWants[name]) or 0
+            end
+            if wantClamp < 1 then
+                wantClamp = craftingAmt + p.staged + earthAmt
+            end
+            craftingAmt = planner.effectiveCraft(craftingAmt, wantClamp, p.staged, earthAmt)
             p.crafting = craftingAmt
-            p.earth = tonumber(snap.amount[name]) or 0
+            p.earth = earthAmt
             local craftable = snap.craftable[name]
             local ae = craftStatus[name]
             if ae == "ok" or ae == "req" then
@@ -531,20 +546,42 @@ local function clearFinishedCraftFlags(order)
     end
 end
 
---- Build the 2 sys status lines from live package state (replaces dead «ожидание AE»).
+--- Sum live AE craft amounts for package order (from uiRows).
+local function packageCraftTotal(order)
+    local n = 0
+    order = order or {}
+    for i = 1, #order do
+        local row = rowByName(order[i])
+        if row then
+            n = n + (tonumber(row.crafting) or 0)
+        end
+    end
+    return n
+end
+
+--- Build the 2 sys status lines from live package state.
+-- Never show a dead «крафт AE, ещё 60 с» countdown while jobs are already running —
+-- that looked frozen even though AE was busy.
 local function buildPackageStatus(opts)
     opts = opts or {}
     local lines = {}
     local left = opts.left
     local crafting = anyActiveCraft(opts.order)
-    if opts.in_wait and left and left > 0 then
-        if crafting then
-            lines[#lines + 1] = ("крафт AE, ещё %d с"):format(left)
+    local craftN = packageCraftTotal(opts.order)
+    local stagedN = tonumber(opts.staged_total) or 0
+    if crafting or craftN > 0 then
+        if craftN > 0 then
+            lines[#lines + 1] = ("крафт AE %d в работе"):format(craftN)
         else
-            lines[#lines + 1] = ("сборка пакета %d с"):format(left)
+            lines[#lines + 1] = "крафт AE запускается"
         end
+        if stagedN > 0 then
+            lines[#lines + 1] = ("в лоадерах %d"):format(stagedN)
+        end
+    elseif opts.in_wait and left and left > 0 then
+        lines[#lines + 1] = ("сборка пакета %d с"):format(left)
     elseif opts.phase == "loading" then
-        lines[#lines + 1] = ("в лоадерах %d"):format(tonumber(opts.staged_total) or 0)
+        lines[#lines + 1] = ("в лоадерах %d"):format(stagedN)
     end
     if opts.last_order then
         lines[#lines + 1] = opts.last_order
@@ -620,7 +657,9 @@ local function aeWatchLoop()
                 end
                 fullEvery = fullEvery + 1
                 local focus = packageOrder
-                local useFocus = focus and #focus > 0 and fullEvery % 4 ~= 0 and lastSnap ~= nil
+                -- Full watchlist getItem is ~2.5–3.7s; during a shot prefer focus (≈100ms)
+                -- and only do a full scan every 8th pass.
+                local useFocus = focus and #focus > 0 and fullEvery % 8 ~= 0 and lastSnap ~= nil
                 local snap = ae_bridge.snapshot(bridge, names, {
                     yield = true,
                     focus = useFocus and focus or nil,
@@ -639,7 +678,42 @@ local function aeWatchLoop()
                 dbg("AE watch err: " .. tostring(err))
             end
         end
-        sleep(AE_WATCH_S)
+        if packageOrder and #packageOrder > 0 then
+            sleep(AE_WATCH_S)
+        else
+            sleep(AE_WATCH_IDLE_S)
+        end
+    end
+end
+
+--- Background Moon stock probe: never block control/export on ender round-trip.
+local function moonWatchLoop()
+    while true do
+        local ok, err = pcall(function()
+            if not ensureNet() then
+                return
+            end
+            local stocks = fetchMoon()
+            if not stocks then
+                return
+            end
+            lastMoonStocks = stocks
+            lastMoonAt = os.clock()
+            local rows, shotMode = planner.assess(cfg.items, stocks, cfg.red_frac)
+            updateUiStatuses(rows, nil, { light = true })
+            -- Only drive global mode when not mid-shot (shot keeps its own mode + merge).
+            if phase == "poll" or phase == "idle" or phase == "cooldown" then
+                mode = shotMode
+            end
+        end)
+        if not ok then
+            dbg("moon watch: " .. tostring(err))
+        end
+        local wait = tonumber(cfg.poll) or MOON_WATCH_S
+        if wait < MOON_WATCH_S then
+            wait = MOON_WATCH_S
+        end
+        net_watch.sleepWatch(wait, noteHotplug)
     end
 end
 
@@ -679,6 +753,8 @@ local function drawUi()
         tostring(#uiRows),
         tostring(#uiDebugLog),
         tostring(uiDebugLog[#uiDebugLog] or ""),
+        -- Blink Крафт↔Загружено every 1s.
+        tostring(math.floor(now) % 2),
     }, "|")
     for i = 1, #uiRows do
         local r = uiRows[i]
@@ -748,11 +824,13 @@ local function requestCrafts(wants, order, force, snap)
             local craftKnown = snap.craftKnown[name] ~= false
             local craftable = snap.craftable[name]
             local reserved = pendingCover(name, now, crafting, craftKnown)
+            local stagedHave = countOf(staged, name) + countOf(buf, name)
+            crafting = planner.effectiveCraft(crafting, need, stagedHave, have)
+            reserved = planner.effectiveCraft(reserved, need, stagedHave + crafting, have)
             if not craftKnown then
                 craftStatus[name] = "req"
             else
-                local missing = need - have - countOf(staged, name) - countOf(buf, name)
-                    - crafting - reserved
+                local missing = need - have - stagedHave - crafting - reserved
                 if missing > 0 then
                     -- getItem.isCraftable=false is common for multi-step patterns (plate←gem).
                     local why = "try"
@@ -844,6 +922,7 @@ local function packageNeedsCraft(wants, order, stagedMap, snap)
                 earth = row and tonumber(row.earth) or 0
                 crafting = row and tonumber(row.crafting) or 0
             end
+            crafting = planner.effectiveCraft(crafting, want, staged, earth)
             if staged + earth + crafting < want then
                 return true
             end
@@ -899,12 +978,14 @@ local function exportAndPush(wants, order)
             end
         end
         local li = 1
+        local moved = 0
         while rem > 0 and li <= #net.loaders do
             local chunk = math.min(rem, 64)
             local n = ae_bridge.exportItemToPeripheral(bridge, name, chunk, net.loaders[li])
             n = tonumber(n) or 0
             if n > 0 then
                 rem = rem - n
+                moved = moved + n
                 staged[name] = countOf(staged, name) + n
                 if snap and snap.amount then
                     snap.amount[name] = math.max(0, (tonumber(snap.amount[name]) or 0) - n)
@@ -913,6 +994,10 @@ local function exportAndPush(wants, order)
                 li = li + 1
             end
             sleep(0)
+        end
+        -- Stale snap earth (craft just landed elsewhere) → one empty loader pass is enough.
+        if rem > 0 and moved < 1 and snap and snap.amount then
+            snap.amount[name] = 0
         end
     end
     pushBuffer(order)
@@ -992,6 +1077,41 @@ local function formatSkipStatus(skipNames)
         s = s .. "…"
     end
     return s
+end
+
+--- Pull latest Moon assess into the in-flight package (gold etc. that dipped mid-craft).
+-- Returns wants, order, shotMode, grew.
+local function mergeMoonIntoPackage(wants, order, shotMode)
+    if not lastMoonStocks then
+        return wants, order, shotMode, false
+    end
+    local rows, newMode = planner.assess(cfg.items, lastMoonStocks, cfg.red_frac)
+    updateUiStatuses(rows, nil, { light = true })
+    if newMode == planner.ZONE_ALARM then
+        shotMode = newMode
+        mode = newMode
+    elseif shotMode ~= planner.ZONE_ALARM and newMode == planner.ZONE_WARN then
+        shotMode = newMode
+        mode = newMode
+    elseif shotMode == planner.ZONE_OK and newMode ~= planner.ZONE_OK then
+        shotMode = newMode
+        mode = newMode
+    end
+    local beforeN = #order
+    local beforeSum = 0
+    for i = 1, #order do
+        beforeSum = beforeSum + (tonumber(wants[order[i]]) or 0)
+    end
+    local w2, o2 = planner.mergePackage(wants, order, rows, shotMode)
+    local afterSum = 0
+    for i = 1, #o2 do
+        afterSum = afterSum + (tonumber(w2[o2[i]]) or 0)
+    end
+    local grew = #o2 > beforeN or afterSum > beforeSum
+    if grew then
+        dbg(("package +moon ids=%d→%d want=%d→%d"):format(beforeN, #o2, beforeSum, afterSum))
+    end
+    return w2, o2, shotMode, grew
 end
 
 local function runShotCycle(rows, shotMode)
@@ -1128,6 +1248,27 @@ local function runShotCycle(rows, shotMode)
             uiTimerEnd = nil
             dbg("wait collapse: AE idle (post-snap)")
         end
+        -- Dynamic Moon top-up: gold (etc.) that entered WARN while we crafted diamond.
+        local grew
+        wants, order, shotMode, grew = mergeMoonIntoPackage(wants, order, shotMode)
+        for i = 1, #order do
+            local name = order[i]
+            local already = false
+            for j = 1, #fullOrder do
+                if fullOrder[j] == name then
+                    already = true
+                    break
+                end
+            end
+            if not already then
+                fullOrder[#fullOrder + 1] = name
+            end
+        end
+        if grew then
+            aeWatchGeneration = aeWatchGeneration + 1
+            lastOrderLine = requestCrafts(wants, order, true, lastSnap) or lastOrderLine
+        end
+
         skip = unavailableSkip()
         wants, order = planner.filterObtainable(wants, order, skip)
         packageWants, packageOrder = wants, order
@@ -1175,7 +1316,11 @@ local function runShotCycle(rows, shotMode)
             skip_line = formatSkipStatus(planner.skippedNames(fullOrder, skip)),
         })
 
-        if planner.shouldFire(satisfied, full) then
+        local more = canLoadMore(wants, order, staged, buf, lastSnap)
+        local keepCrafting = packageNeedsCraft(wants, order, staged, lastSnap)
+        -- Do not fire while Earth still has something obtainable to push into loaders
+        -- (e.g. gold just merged into the package). Loaders-full still fires.
+        if planner.shouldFire(satisfied, full, more or keepCrafting) then
             if tryFire() then
                 uiWaitName = nil
                 clearStatusLines()
@@ -1193,8 +1338,6 @@ local function runShotCycle(rows, shotMode)
                 clearStatusLines()
                 return
             end
-            local more = canLoadMore(wants, order, staged, buf, lastSnap)
-            local keepCrafting = packageNeedsCraft(wants, order, staged, lastSnap)
             if planner.shouldYield(inCraftWait, more, satisfied, full, keepCrafting) then
                 phase = "poll"
                 uiTimerEnd = nil
@@ -1246,7 +1389,18 @@ local function tick()
 
     phase = "poll"
     uiTimerEnd = nil
-    local stocks = fetchMoon()
+    -- Moon stocks come only from moonWatchLoop (no competing rednet from control).
+    local stocks = lastMoonStocks
+    if not stocks or (os.clock() - lastMoonAt) > 45 then
+        local deadline = os.clock() + (tonumber(cfg.stock_timeout) or 5) + 2
+        while os.clock() < deadline do
+            if lastMoonStocks and (os.clock() - lastMoonAt) <= 45 then
+                break
+            end
+            sleep(0.25)
+        end
+        stocks = lastMoonStocks
+    end
     if not stocks then
         -- cfg skeleton stays; mark moon unknown and refresh Earth/craft statuses
         ensureUiSkeleton()
@@ -1254,7 +1408,7 @@ local function tick()
             uiRows[i].moon = 0
             uiRows[i].zone = "?"
         end
-        updateUiStatuses(nil, bridge)
+        updateUiStatuses(nil, bridge, { reuse = true })
         snapshotLoaders()
         return
     end
@@ -1264,9 +1418,10 @@ local function tick()
     -- Prefer aeWatch snap; only force a scan if watch is cold.
     updateUiStatuses(rows, bridge, { reuse = true })
     snapshotLoaders()
-    dbg(("poll %dms mode=%s"):format(
+    dbg(("poll %dms mode=%s moon=%ds"):format(
         math.floor((os.clock() - tTick) * 1000 + 0.5),
-        tostring(shotMode)
+        tostring(shotMode),
+        math.floor(os.clock() - lastMoonAt + 0.5)
     ))
 
     if shotMode == planner.ZONE_OK then
@@ -1315,5 +1470,5 @@ snapshotLoaders()
 ensureUiSkeleton()
 pcall(drawUi)
 
-print("moon_supply earth: parallel UI + AE watch + control")
-parallel.waitForAny(controlLoop, uiLoop, aeWatchLoop)
+print("moon_supply earth: parallel UI + AE watch + Moon watch + control")
+parallel.waitForAny(controlLoop, uiLoop, aeWatchLoop, moonWatchLoop)

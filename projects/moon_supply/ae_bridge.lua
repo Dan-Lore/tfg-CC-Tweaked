@@ -473,7 +473,7 @@ function ae_bridge.snapshot(bridge, names, opts)
         local info = ae_bridge.getItemInfo(bridge, n)
         amount[n] = info.amount
         craftable[n] = info.craftable
-        if opts.yield and (i % 2 == 0) then
+        if opts.yield and (i % 4 == 0) then
             sleep(0)
         end
     end

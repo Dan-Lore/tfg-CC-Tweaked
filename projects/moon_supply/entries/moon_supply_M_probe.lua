@@ -17,6 +17,12 @@ local cfg = configMod.loadMoon()
 local bridgeName = nil
 local bridge = nil
 local lastReqCount = 0
+-- Full watchlist getItem is ~1s/id on large ME (~20s for 22 ids). Warm once, then
+-- refresh a rotating slice each stock_req so Earth gets a reply in a few seconds.
+local stockCache = {}
+local stockCursor = 1
+local stockWarmed = false
+local REFRESH_PER_REQ = 6
 
 local function openModem()
     local side = discover.modem(cfg)
@@ -42,17 +48,48 @@ local function refreshBridge()
 end
 
 local function stocksFor(ids)
+    ids = ids or {}
+    local n = #ids
     local stocks = {}
     if not bridge then
         refreshBridge()
     end
-    for i = 1, #(ids or {}) do
+    if n < 1 then
+        return stocks
+    end
+
+    local function readOne(id)
+        if type(id) == "string" then
+            stockCache[id] = ae_bridge.getItemAmount(bridge, id)
+        end
+    end
+
+    if not stockWarmed then
+        for i = 1, n do
+            readOne(ids[i])
+            if i % 4 == 0 then
+                sleep(0)
+            end
+        end
+        stockWarmed = true
+        stockCursor = 1
+    else
+        local take = math.min(REFRESH_PER_REQ, n)
+        local start = stockCursor
+        for k = 1, take do
+            local i = ((start + k - 2) % n) + 1
+            readOne(ids[i])
+            if k % 3 == 0 then
+                sleep(0)
+            end
+        end
+        stockCursor = ((start + take - 1) % n) + 1
+    end
+
+    for i = 1, n do
         local id = ids[i]
         if type(id) == "string" then
-            stocks[id] = ae_bridge.getItemAmount(bridge, id)
-        end
-        if i % 8 == 0 then
-            sleep(0)
+            stocks[id] = tonumber(stockCache[id]) or 0
         end
     end
     return stocks

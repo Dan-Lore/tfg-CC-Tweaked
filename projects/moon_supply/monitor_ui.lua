@@ -25,6 +25,18 @@ local NAMES = {
     ["minecraft:gold_ingot"] = "слиток золота",
     ["gtceu:dense_silicon_plate"] = "плотн. пластина кремний",
     ["tfg:silica_aerogel"] = "аэрогель",
+    ["gtceu:iv_emitter"] = "эмиттер IV",
+    ["ae2:wireless_receiver"] = "беспроводной приёмник",
+    ["gtceu:iv_sensor"] = "сенсор IV",
+    ["gtceu:iv_machine_casing"] = "корпус машины IV",
+    ["gtceu:titanium_tungsten_carbide_plate"] = "пластина W-TiC",
+    ["tfg:luv_universal_circuit"] = "схема LuV",
+    ["gtceu:iv_robot_arm"] = "роборука IV",
+    ["gtceu:laminated_glass"] = "ламинир. стекло",
+    ["gtceu:double_titanium_tungsten_carbide_plate"] = "двойн. пластина W-TiC",
+    ["gtceu:tungsten_steel_plate"] = "пластина вольфр. стали",
+    ["gtceu:exquisite_amethyst_gem"] = "Аметист (Изыск.)",
+    ["gtceu:iv_conveyor_module"] = "конвейер IV",
 }
 
 -- Display only. group = block on the monitor; rank = smaller→larger inside the group.
@@ -33,24 +45,36 @@ local ORDER = {
     ["tfg:hv_universal_circuit"] = { 1, 2 },
     ["tfg:ev_universal_circuit"] = { 1, 3 },
     ["tfg:iv_universal_circuit"] = { 1, 4 },
+    ["tfg:luv_universal_circuit"] = { 1, 5 },
     ["gtceu:mv_conveyor_module"] = { 2, 1 },
-    ["gtceu:mv_robot_arm"] = { 2, 2 },
-    ["gtceu:hv_robot_arm"] = { 2, 3 },
-    ["gtceu:cpu_chip"] = { 2, 4 },
-    ["gtceu:ram_chip"] = { 2, 5 },
+    ["gtceu:iv_conveyor_module"] = { 2, 2 },
+    ["gtceu:mv_robot_arm"] = { 2, 3 },
+    ["gtceu:hv_robot_arm"] = { 2, 4 },
+    ["gtceu:iv_robot_arm"] = { 2, 5 },
+    ["gtceu:iv_emitter"] = { 2, 6 },
+    ["gtceu:iv_sensor"] = { 2, 7 },
+    ["gtceu:cpu_chip"] = { 2, 8 },
+    ["gtceu:ram_chip"] = { 2, 9 },
     ["minecraft:gold_ingot"] = { 3, 1 },
     ["gtceu:aluminium_ingot"] = { 3, 2 },
     ["gtceu:stainless_steel_ingot"] = { 3, 3 },
+    ["gtceu:tungsten_steel_plate"] = { 3, 4 },
     ["gtceu:polyethylene_foil"] = { 4, 1 },
     ["gtceu:polyvinyl_chloride_foil"] = { 4, 2 },
     ["gtceu:silicon_plate"] = { 5, 1 },
     ["gtceu:dense_silicon_plate"] = { 5, 2 },
     ["gtceu:diamond_plate"] = { 5, 3 },
+    ["gtceu:titanium_tungsten_carbide_plate"] = { 5, 4 },
+    ["gtceu:double_titanium_tungsten_carbide_plate"] = { 5, 5 },
+    ["gtceu:laminated_glass"] = { 5, 6 },
+    ["gtceu:iv_machine_casing"] = { 5, 7 },
     ["gtceu:exquisite_quartzite_gem"] = { 6, 1 },
     ["gtceu:exquisite_nether_quartz_gem"] = { 6, 2 },
     ["gtceu:exquisite_certus_quartz_gem"] = { 6, 3 },
+    ["gtceu:exquisite_amethyst_gem"] = { 6, 4 },
     ["minecraft:redstone"] = { 7, 1 },
     ["tfg:silica_aerogel"] = { 7, 2 },
+    ["ae2:wireless_receiver"] = { 7, 3 },
 }
 
 local function sortKey(name)
@@ -272,9 +296,10 @@ function monitor_ui.phasePulseSuffix(phase, clock)
 end
 
 --- Status cell text + color from crafting / staged / AE availability.
--- Craft wins over staged so a partial loader fill does not hide an active AE job.
+-- When both craft and staged > 0: blink 1s «Крафт (n)» / 1s «Загружено (n)»
+-- so loaders cargo and inbound AE job are both visible. Yellow–orange tones.
 -- phase "cooldown" or opts.sent_freeze: staged cargo was fired → «Отправлено».
--- opts may be a boolean (legacy sent_freeze) or { sent_freeze = true }.
+-- opts may be a boolean (legacy sent_freeze) or { sent_freeze=, clock= }.
 function monitor_ui.statusCell(row, phase, opts)
     row = row or {}
     if type(opts) == "boolean" then
@@ -286,14 +311,25 @@ function monitor_ui.statusCell(row, phase, opts)
     local crafting = math.max(0, math.floor(tonumber(row.crafting) or 0))
     local ae = tostring(row.ae or row.craft or "")
     local sent = phase == "cooldown" or opts.sent_freeze == true
+    local clock = tonumber(opts.clock) or os.clock()
+    -- Even second → craft (inbound); odd → loaded (already in railgun).
+    local showCraft = (math.floor(clock) % 2) == 0
+    local colCraft = colors.orange
+    local colLoaded = colors.yellow
     if sent and staged > 0 then
-        return ("Отправлено (%d)"):format(staged), colors.yellow
+        return ("Отправлено (%d)"):format(staged), colLoaded
+    end
+    if crafting > 0 and staged > 0 then
+        if showCraft then
+            return ("Крафт (%d)"):format(crafting), colCraft
+        end
+        return ("Загружено (%d)"):format(staged), colLoaded
     end
     if crafting > 0 then
-        return ("Крафт (%d)"):format(crafting), colors.yellow
+        return ("Крафт (%d)"):format(crafting), colCraft
     end
     if staged > 0 then
-        return ("Загружено (%d)"):format(staged), colors.yellow
+        return ("Загружено (%d)"):format(staged), colLoaded
     end
     if ae == "no" or ae == "fail" then
         return "Нет в AE", colors.red
@@ -507,7 +543,10 @@ function monitor_ui.draw(mon, state)
         end
         targets[i] = fmtNum(r.target)
         earths[i] = fmtNum(r.earth)
-        local st, sc = monitor_ui.statusCell(r, phaseKey, { sent_freeze = state.sent_freeze == true })
+        local st, sc = monitor_ui.statusCell(r, phaseKey, {
+            sent_freeze = state.sent_freeze == true,
+            clock = state.clock,
+        })
         statuses[i] = st
         statusColors[i] = sc
         stockColors[i] = monitor_ui.stockColor(r.moon, r.target, r.zone)

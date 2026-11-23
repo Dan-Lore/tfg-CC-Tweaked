@@ -159,8 +159,17 @@ function planner.skippedNames(order, skip)
 end
 
 --- Fire when the package is in the loaders, or every loader is slot-full.
-function planner.shouldFire(packageDone, loadersFull)
-    return packageDone == true or loadersFull == true
+-- moreToLoad: obtainable shortfall still on Earth/buffer/craft — do not fire a WARN
+-- package early while gold (etc.) can still be pushed in. Loaders-full always fires
+-- (no free slots left); WARN zone rules themselves are unchanged.
+function planner.shouldFire(packageDone, loadersFull, moreToLoad)
+    if loadersFull == true then
+        return true
+    end
+    if moreToLoad == true then
+        return false
+    end
+    return packageDone == true
 end
 
 --- Leave cargo in the loaders and poll again when the package cannot be finished.
@@ -174,6 +183,54 @@ function planner.shouldYield(inCraftWait, canLoadMore, packageDone, loadersFull,
         return false
     end
     return not canLoadMore
+end
+
+--- Expand an in-flight shot with fresh Moon deficits (never shrink mid-shot).
+-- New WARN/ALARM ids append in cfg/zone order; existing wants take max(old, new deficit).
+function planner.mergePackage(wants, order, rows, mode)
+    wants = wants or {}
+    order = order or {}
+    local addW, addO = planner.packageWants(rows, mode)
+    local w2, o2, seen = {}, {}, {}
+    for i = 1, #order do
+        local name = order[i]
+        local prev = tonumber(wants[name]) or 0
+        if prev > 0 then
+            w2[name] = prev
+            o2[#o2 + 1] = name
+            seen[name] = true
+        end
+    end
+    for i = 1, #addO do
+        local name = addO[i]
+        local d = tonumber(addW[name]) or 0
+        if d > 0 then
+            local prev = tonumber(w2[name]) or 0
+            if d > prev then
+                w2[name] = d
+            elseif prev < 1 then
+                w2[name] = d
+            end
+            if not seen[name] then
+                seen[name] = true
+                o2[#o2 + 1] = name
+            end
+        end
+    end
+    return w2, o2
+end
+
+--- Clamp AE craft count so finished output already in earth/staged is not double-counted.
+-- want<=0 → return crafting unchanged (no package target to clamp against).
+function planner.effectiveCraft(crafting, want, staged, earth)
+    crafting = math.max(0, math.floor(tonumber(crafting) or 0))
+    want = math.max(0, math.floor(tonumber(want) or 0))
+    if want < 1 then
+        return crafting
+    end
+    local covered = math.max(0, math.floor(tonumber(staged) or 0))
+        + math.max(0, math.floor(tonumber(earth) or 0))
+    return math.min(crafting, math.max(0, want - covered))
 end
 
 return planner
