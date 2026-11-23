@@ -59,7 +59,13 @@ local AE_WATCH_S = 0.75
 local AE_WATCH_IDLE_S = 1.25
 local MOON_WATCH_S = 2
 local CRAFT_RETRY_S = 2
+local EXPORT_FAIL_COOLDOWN_S = 2
+local CRAFT_SOFT_COOLDOWN_S = 8
+local CRAFT_SOFT_FAIL_MAX = 2
 local DEBUG_LOG_N = 4
+local exportFailUntil = {} -- name -> os.clock when export may retry after a zero move
+local craftFailUntil = {} -- name -> os.clock soft-fail craft cooldown
+local craftSoftFails = {} -- name -> consecutive soft-fail count this shot
 
 local function setStatusLines(a, b, c)
     -- Accept a list table or up to 3 string args (CC-safe, no table.unpack).
@@ -175,6 +181,8 @@ local function reloadCfg(force)
     if itemsChanged then
         craftStatus = {}
         craftPending = {}
+        craftSoftFails = {}
+        craftFailUntil = {}
         ensureUiSkeleton()
         print(("moon_supply earth: watchlist reloaded (%d items)"):format(#cfg.items))
     else
@@ -416,9 +424,6 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
             local craftKnown = snap.craftKnown[name] ~= false
             local reserved = pendingCover(name, now, craftingAmt, craftKnown)
             craftingAmt = math.max(craftingAmt, reserved)
-            if not craftKnown and craftingAmt < 1 then
-                craftingAmt = 1
-            end
             -- Clamp craft against earth+staged so finished AE output is not shown twice
             -- (Крафт 121 while already in Земля/Загружено).
             local wantClamp = 0
@@ -428,6 +433,13 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
             if wantClamp < 1 then
                 wantClamp = craftingAmt + p.staged + earthAmt
             end
+            -- Opaque job → show 1 only while the package row is still short.
+            local covered = p.staged + earthAmt
+            if not craftKnown and craftingAmt < 1 then
+                if wantClamp < 1 or covered < wantClamp then
+                    craftingAmt = 1
+                end
+            end
             craftingAmt = planner.effectiveCraft(craftingAmt, wantClamp, p.staged, earthAmt)
             p.crafting = craftingAmt
             p.earth = earthAmt
@@ -435,6 +447,8 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
             local ae = craftStatus[name]
             if ae == "ok" or ae == "req" then
                 ae = nil
+            elseif ae == "no" or ae == "fail" then
+                -- keep hard-fail flags for UI «Нет в AE»
             elseif ae == nil and p.earth < 1 and craftable == false then
                 ae = "no"
             end
@@ -607,16 +621,20 @@ local function buildPackageStatus(opts)
 end
 
 --- Items we cannot obtain right now must not block the shot forever.
+-- Honours craftStatus "no"/"fail" directly (UI may clear row.ae for display).
+-- Staged > 0 is OK to skip: already-loaded cargo still fires; remainder is dropped.
 local function unavailableSkip()
     local skip = {}
     for i = 1, #uiRows do
         local r = uiRows[i]
+        local st = tostring(craftStatus[r.name] or "")
         local ae = tostring(r.ae or "")
-        if ae == "no" or ae == "fail" then
+        local hard = st == "no" or st == "fail" or ae == "no" or ae == "fail"
+        if hard then
             local crafting = math.floor(tonumber(r.crafting) or 0)
-            local staged = math.floor(tonumber(r.staged) or 0)
             local earth = math.floor(tonumber(r.earth) or 0)
-            if crafting < 1 and staged < 1 and earth < 1 then
+            -- Still obtainable from AE stock or an active job — keep in package.
+            if crafting < 1 and earth < 1 then
                 skip[r.name] = true
             end
         end
@@ -657,9 +675,10 @@ local function aeWatchLoop()
                 end
                 fullEvery = fullEvery + 1
                 local focus = packageOrder
-                -- Full watchlist getItem is ~2.5–3.7s; during a shot prefer focus (≈100ms)
-                -- and only do a full scan every 8th pass.
-                local useFocus = focus and #focus > 0 and fullEvery % 8 ~= 0 and lastSnap ~= nil
+                -- Full watchlist getItem is ~2.5–3.8s; during a shot prefer focus.
+                -- Large watchlists (≥30): full scan every 12th pass; else every 8th.
+                local fullEveryN = (#names >= 30) and 12 or 8
+                local useFocus = focus and #focus > 0 and fullEvery % fullEveryN ~= 0 and lastSnap ~= nil
                 local snap = ae_bridge.snapshot(bridge, names, {
                     yield = true,
                     focus = useFocus and focus or nil,
@@ -818,7 +837,9 @@ local function requestCrafts(wants, order, force, snap)
     for i = 1, #order do
         local name = order[i]
         local need = tonumber(wants[name]) or 0
-        if need > 0 then
+        local st0 = tostring(craftStatus[name] or "")
+        local coolUntil = tonumber(craftFailUntil[name]) or 0
+        if need > 0 and st0 ~= "no" and st0 ~= "fail" and now >= coolUntil then
             local have = tonumber(snap.amount[name]) or 0
             local crafting = tonumber(snap.crafting[name]) or 0
             local craftKnown = snap.craftKnown[name] ~= false
@@ -827,7 +848,11 @@ local function requestCrafts(wants, order, force, snap)
             local stagedHave = countOf(staged, name) + countOf(buf, name)
             crafting = planner.effectiveCraft(crafting, need, stagedHave, have)
             reserved = planner.effectiveCraft(reserved, need, stagedHave + crafting, have)
-            if not craftKnown then
+            if have + stagedHave >= need then
+                craftStatus[name] = "ok"
+                craftSoftFails[name] = nil
+                craftFailUntil[name] = nil
+            elseif not craftKnown then
                 craftStatus[name] = "req"
             else
                 local missing = need - have - stagedHave - crafting - reserved
@@ -840,7 +865,7 @@ local function requestCrafts(wants, order, force, snap)
                         local okProbe, probeWhy = ae_bridge.isItemCraftable(bridge, name, 1)
                         if okProbe then
                             why = probeWhy or "probe"
-                        elseif probeWhy == "not craftable" or probeWhy == "ITEM_NOT_FOUND" then
+                        elseif ae_bridge.isHardCraftFail(probeWhy) then
                             why = "try:" .. tostring(probeWhy)
                         end
                     end
@@ -870,18 +895,41 @@ local function requestCrafts(wants, order, force, snap)
                     end
                     if scheduledTotal > 0 then
                         craftStatus[name] = "req"
+                        craftSoftFails[name] = nil
+                        craftFailUntil[name] = nil
                         ordered = ordered + 1
                         lastOrderLine = "заказ AE: "
                             .. monitor_ui.itemLabel(name)
                             .. (" ×%d"):format(scheduledTotal)
                         dbg(lastOrderLine .. " (" .. tostring(why) .. ")")
                     else
-                        craftStatus[name] = nil
-                        lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
-                        dbg(lastOrderLine .. " " .. tostring(lastErr or why or ""))
-                        if lastErr and lastErr ~= "API ok, no AE job" and lastErr ~= "craft returned nil"
-                            and lastErr ~= "not craftable" and lastErr ~= "ITEM_NOT_FOUND" then
-                            setError(shortErr(name, lastErr))
+                        if ae_bridge.isHardCraftFail(lastErr) then
+                            craftStatus[name] = "no"
+                            lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
+                            dbg(lastOrderLine .. " " .. tostring(lastErr) .. " → skip")
+                        elseif ae_bridge.isSoftCraftFail(lastErr) then
+                            local nFail = (tonumber(craftSoftFails[name]) or 0) + 1
+                            craftSoftFails[name] = nFail
+                            craftFailUntil[name] = now + CRAFT_SOFT_COOLDOWN_S
+                            lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
+                            if nFail >= CRAFT_SOFT_FAIL_MAX then
+                                craftStatus[name] = "fail"
+                                dbg(lastOrderLine .. " " .. tostring(lastErr)
+                                    .. (" → skip soft (%d)"):format(nFail))
+                            else
+                                craftStatus[name] = nil
+                                dbg(lastOrderLine .. " " .. tostring(lastErr)
+                                    .. (" cool %ds (%d/%d)"):format(
+                                        CRAFT_SOFT_COOLDOWN_S, nFail, CRAFT_SOFT_FAIL_MAX
+                                    ))
+                            end
+                        else
+                            craftStatus[name] = nil
+                            lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
+                            dbg(lastOrderLine .. " " .. tostring(lastErr or why or ""))
+                            if lastErr then
+                                setError(shortErr(name, lastErr))
+                            end
                         end
                     end
                 else
@@ -910,7 +958,8 @@ local function packageNeedsCraft(wants, order, stagedMap, snap)
     for i = 1, #order do
         local name = order[i]
         local want = tonumber(wants[name]) or 0
-        if want > 0 and craftStatus[name] ~= "no" then
+        local st = tostring(craftStatus[name] or "")
+        if want > 0 and st ~= "no" and st ~= "fail" then
             local staged = countOf(stagedMap, name)
             local earth = 0
             local crafting = 0
@@ -950,6 +999,7 @@ local function pushBuffer(order)
 end
 
 --- Export AE items straight into HV loaders (exportItemToPeripheral). Buffer optional.
+-- Stock (earth>0) first; skip full loaders and hard-fail / cooldown ids to avoid ~10s spam.
 local function exportAndPush(wants, order)
     if not bridge then
         setError("нет ME-моста")
@@ -962,42 +1012,89 @@ local function exportAndPush(wants, order)
     pushBuffer(order)
     local staged = select(1, stagedCounts())
     local snap = lastSnap
+    local now = os.clock()
+
+    -- Open loaders only (full ones reject every exportItem ~100–900ms).
+    local openLoaders = {}
+    for i = 1, #net.loaders do
+        local ln = net.loaders[i]
+        if peripheral.isPresent(ln) and not railgun_hw.loaderFull(ln) then
+            openLoaders[#openLoaders + 1] = ln
+        end
+    end
+    if #openLoaders < 1 then
+        pushBuffer(order)
+        return true
+    end
+
+    -- Prefer ids already in AE so amethyst/LuV load before zero-earth craft rows.
+    local withStock, withoutStock = {}, {}
     for i = 1, #order do
         local name = order[i]
-        local rem = (tonumber(wants[name]) or 0) - countOf(staged, name)
-        if rem > 0 then
+        local st = tostring(craftStatus[name] or "")
+        if st ~= "no" and st ~= "fail" then
+            local rem = (tonumber(wants[name]) or 0) - countOf(staged, name)
             local earth = 0
             if snap and snap.amount then
                 earth = tonumber(snap.amount[name]) or 0
             end
-            -- Skip empty AE pulls — was ~10s of failed exportItem spam per shot loop.
+            if rem > 0 and earth > 0 then
+                withStock[#withStock + 1] = name
+            elseif rem > 0 then
+                withoutStock[#withoutStock + 1] = name
+            end
+        end
+    end
+    local exportOrder = {}
+    for i = 1, #withStock do
+        exportOrder[#exportOrder + 1] = withStock[i]
+    end
+    for i = 1, #withoutStock do
+        exportOrder[#exportOrder + 1] = withoutStock[i]
+    end
+
+    for i = 1, #exportOrder do
+        local name = exportOrder[i]
+        local coolUntil = tonumber(exportFailUntil[name]) or 0
+        if now < coolUntil then
+            -- Recent zero-move; wait for a fresh AE snap before burning loaders again.
+        else
+            local rem = (tonumber(wants[name]) or 0) - countOf(staged, name)
+            local earth = 0
+            if snap and snap.amount then
+                earth = tonumber(snap.amount[name]) or 0
+            end
             if earth < 1 then
                 rem = 0
             else
                 rem = math.min(rem, earth)
             end
-        end
-        local li = 1
-        local moved = 0
-        while rem > 0 and li <= #net.loaders do
-            local chunk = math.min(rem, 64)
-            local n = ae_bridge.exportItemToPeripheral(bridge, name, chunk, net.loaders[li])
-            n = tonumber(n) or 0
-            if n > 0 then
-                rem = rem - n
-                moved = moved + n
-                staged[name] = countOf(staged, name) + n
-                if snap and snap.amount then
-                    snap.amount[name] = math.max(0, (tonumber(snap.amount[name]) or 0) - n)
+            local li = 1
+            local moved = 0
+            while rem > 0 and li <= #openLoaders do
+                local chunk = math.min(rem, 64)
+                local n = ae_bridge.exportItemToPeripheral(bridge, name, chunk, openLoaders[li])
+                n = tonumber(n) or 0
+                if n > 0 then
+                    rem = rem - n
+                    moved = moved + n
+                    staged[name] = countOf(staged, name) + n
+                    if snap and snap.amount then
+                        snap.amount[name] = math.max(0, (tonumber(snap.amount[name]) or 0) - n)
+                    end
+                else
+                    li = li + 1
                 end
-            else
-                li = li + 1
+                sleep(0)
             end
-            sleep(0)
-        end
-        -- Stale snap earth (craft just landed elsewhere) → one empty loader pass is enough.
-        if rem > 0 and moved < 1 and snap and snap.amount then
-            snap.amount[name] = 0
+            if rem > 0 and moved < 1 then
+                if snap and snap.amount then
+                    snap.amount[name] = 0
+                end
+                exportFailUntil[name] = now + EXPORT_FAIL_COOLDOWN_S
+            elseif moved > 0 then
+                exportFailUntil[name] = nil
+            end
         end
     end
     pushBuffer(order)
@@ -1133,6 +1230,9 @@ local function runShotCycle(rows, shotMode)
     -- New intentional load cycle — stop showing «Отправлено».
     uiSentFreeze = false
     craftStatus = {}
+    exportFailUntil = {}
+    craftFailUntil = {}
+    craftSoftFails = {}
     packageWants, packageOrder = wants, order
     aeWatchGeneration = aeWatchGeneration + 1
     updateUiStatuses(rows, bridge, { reuse = true, focus = order })

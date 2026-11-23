@@ -488,6 +488,45 @@ function ae_bridge.snapshot(bridge, names, opts)
     }
 end
 
+--- Hard AE rejects that must not be retried this shot (no pattern / unknown id).
+-- AP may return "not craftable", "ITEM_NOT_FOUND", or "NOT_CRAFTABLE".
+function ae_bridge.isHardCraftFail(err)
+    err = tostring(err or "")
+    if err == "" then
+        return false
+    end
+    local lower = err:lower()
+    if lower == "not craftable" or lower == "item_not_found" or lower == "not_craftable" then
+        return true
+    end
+    if lower:find("not_craftable", 1, true) or lower:find("not craftable", 1, true) then
+        return true
+    end
+    if lower:find("item_not_found", 1, true) then
+        return true
+    end
+    return false
+end
+
+--- Soft rejects: API looked OK but no CPU job (or nil). Retry with cooldown, then skip.
+function ae_bridge.isSoftCraftFail(err)
+    err = tostring(err or "")
+    if err == "" then
+        return false
+    end
+    if err == "API ok, no AE job" or err == "craft returned nil" then
+        return true
+    end
+    local lower = err:lower()
+    if lower:find("api ok, no ae job", 1, true) then
+        return true
+    end
+    if lower:find("craft returned nil", 1, true) then
+        return true
+    end
+    return false
+end
+
 --- Parse AP craftItem return. Nil alone is NOT success (was a false-positive that
 -- showed «заказ AE» with крафт=0 while no CPU job existed).
 local function interpretCraftReturn(a, b)
@@ -572,11 +611,12 @@ function ae_bridge.craftItem(bridge, name, count)
             if ae_bridge.hasCraftJob(bridge, name) then
                 return true, nil, n
             end
-            err = "API ok, no AE job"
+            -- Ghost success: smaller counts will not create a job either — stop here.
+            return false, "API ok, no AE job", 0
         else
             err = why or err
             -- Hard reject — no point trying smaller sizes.
-            if why == "not craftable" or why == "ITEM_NOT_FOUND" then
+            if ae_bridge.isHardCraftFail(why) then
                 return false, err, 0
             end
         end

@@ -169,6 +169,16 @@ A.suite("moon_supply planner", {
             local skipped = planner.skippedNames({ "a", "b" }, { b = true })
             A.eq(#skipped, 1)
             A.eq(skipped[1], "b")
+            -- NOT_CRAFTABLE path: craftStatus=no → skip → filtered package can still fire.
+            local w3, o3 = planner.filterObtainable(
+                { diamond = 128, doublePlate = 128 },
+                { "diamond", "doublePlate" },
+                { doublePlate = true }
+            )
+            A.eq(w3.diamond, 128)
+            A.eq(w3.doublePlate, nil)
+            A.eq(planner.packageDone(w3, { diamond = 128 }, {}), true)
+            A.eq(#o3, 1)
         end,
     },
     {
@@ -239,6 +249,45 @@ A.suite("moon_supply loader cargo", {
 local ae_bridge = require("ae_bridge")
 
 A.suite("moon_supply ae craft cover", {
+    {
+        name = "isHardCraftFail recognizes AP reject strings",
+        fn = function()
+            A.eq(ae_bridge.isHardCraftFail("not craftable"), true)
+            A.eq(ae_bridge.isHardCraftFail("ITEM_NOT_FOUND"), true)
+            A.eq(ae_bridge.isHardCraftFail("NOT_CRAFTABLE"), true)
+            A.eq(ae_bridge.isHardCraftFail("AE: NOT_CRAFTABLE"), true)
+            A.eq(ae_bridge.isHardCraftFail("API ok, no AE job"), false)
+            A.eq(ae_bridge.isHardCraftFail(nil), false)
+        end,
+    },
+    {
+        name = "isSoftCraftFail and ghost craft stops size fallback",
+        fn = function()
+            A.eq(ae_bridge.isSoftCraftFail("API ok, no AE job"), true)
+            A.eq(ae_bridge.isSoftCraftFail("craft returned nil"), true)
+            A.eq(ae_bridge.isSoftCraftFail("not craftable"), false)
+            local calls = {}
+            local bridge = {
+                craftItem = function(filter)
+                    calls[#calls + 1] = filter and filter.count
+                    return true
+                end,
+                isItemCrafting = function()
+                    return false
+                end,
+                getCraftingTasks = function()
+                    return {}
+                end,
+            }
+            local ok, err, n = ae_bridge.craftItem(bridge, "gtceu:iv_emitter", 128)
+            A.eq(ok, false)
+            A.eq(n, 0)
+            A.eq(err, "API ok, no AE job")
+            -- Must not fall through 256/64/16/1 after ghost success.
+            A.eq(#calls, 1)
+            A.eq(calls[1], 128)
+        end,
+    },
     {
         name = "isItemCrafting blocks unknown amount",
         fn = function()
@@ -554,26 +603,36 @@ A.suite("moon_supply monitor", {
                 { name = "tfg:iv_universal_circuit" },
                 { name = "gtceu:hv_robot_arm" },
                 { name = "tfg:lv_universal_circuit" },
+                { name = "tfg:ulv_universal_circuit" },
                 { name = "minecraft:gold_ingot" },
+                { name = "gtceu:iv_electric_piston" },
                 { name = "gtceu:mv_robot_arm" },
                 { name = "gtceu:aluminium_ingot" },
                 { name = "minecraft:redstone" },
                 { name = "gtceu:diamond_plate" },
+                { name = "gtceu:tungsten_steel_plate" },
                 { name = "gtceu:silicon_plate" },
+                { name = "gtceu:exquisite_amethyst_gem" },
+                { name = "gtceu:exquisite_ruby_gem" },
             })
             local names = {}
             for i = 1, #sorted do
                 names[i] = sorted[i].name
             end
-            A.eq(names[1], "tfg:lv_universal_circuit")
-            A.eq(names[2], "tfg:iv_universal_circuit")
-            A.eq(names[3], "gtceu:mv_robot_arm")
-            A.eq(names[4], "gtceu:hv_robot_arm")
-            A.eq(names[5], "minecraft:gold_ingot")
-            A.eq(names[6], "gtceu:aluminium_ingot")
-            A.eq(names[7], "gtceu:silicon_plate")
-            A.eq(names[8], "gtceu:diamond_plate")
-            A.eq(names[9], "minecraft:redstone")
+            A.eq(names[1], "tfg:ulv_universal_circuit")
+            A.eq(names[2], "tfg:lv_universal_circuit")
+            A.eq(names[3], "tfg:iv_universal_circuit")
+            A.eq(names[4], "gtceu:iv_electric_piston")
+            A.eq(names[5], "gtceu:mv_robot_arm")
+            A.eq(names[6], "gtceu:hv_robot_arm")
+            A.eq(names[7], "minecraft:gold_ingot")
+            A.eq(names[8], "gtceu:aluminium_ingot")
+            A.eq(names[9], "gtceu:diamond_plate")
+            A.eq(names[10], "gtceu:tungsten_steel_plate")
+            A.eq(names[11], "gtceu:silicon_plate")
+            A.eq(names[12], "gtceu:exquisite_ruby_gem")
+            A.eq(names[13], "gtceu:exquisite_amethyst_gem")
+            A.eq(names[14], "minecraft:redstone")
         end,
     },
 })

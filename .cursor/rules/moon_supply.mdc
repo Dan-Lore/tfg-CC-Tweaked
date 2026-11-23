@@ -37,12 +37,12 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
    - **WARN** if no ALARM but any `moon < target`
    - **OK** → idle
 3. Build a shot package from deficits. Within a zone, cfg order. In **ALARM**, alarm items load before warn items of the same shot. **WARN** sends warn deficits only. Mid-shot, `mergePackage` expands wants from fresh Moon assess (e.g. gold dips while diamond crafts) — never shrinks in-flight wants.
-4. Missing on Earth: try `craftItem` on the **final** item (AE expands multi-step trees itself). Prefer full ask →256→64→16→1; verify CPU job. Keep topping up crafts after wait-collapse until the package deficit is covered. `effectiveCraft` clamps AE craft vs earth+staged so finished output is not double-counted in Крафт/Земля/Загружено. Row status blinks `Крафт (n)` ↔ `Загружено (m)` (1 s each, orange/yellow) when both inbound and loaded; sys line shows live `крафт AE N в работе`, not a dead 60 s countdown.
-5. After the first craft probe, **unobtainable** ids are dropped from the shot. If nothing remains, **no craft-wait / no launch prep** — idle + status `не шлём (нет в AE): …`.
-6. During craft-wait (**ALARM 60 s** / **WARN 120 s**, or **3 s** if no AE jobs) only for obtainable items: export AE → loaders; re-request craft as needed. **Collapse wait as soon as AE CPUs are idle** (sticky `req`/pending no longer holds the full timer after craft finishes). Title stays short (`сборка` / `загрузка`); status lines say `крафт AE` / `сборка пакета` / `выгрузка`. Debug ring under the table shows timings.
+4. Missing on Earth: try `craftItem` on the **final** item (AE expands multi-step trees itself). Prefer full ask →256→64→16→1; verify CPU job. Ghost success (`API ok` without a job) stops size fallback immediately. Keep topping up crafts after wait-collapse until the package deficit is covered. Hard fails (`NOT_CRAFTABLE` / `not craftable` / `ITEM_NOT_FOUND`) set `craftStatus=no`. Soft fails (`API ok, no AE job` / `craft returned nil`): 8 s cooldown, after 2 in a shot → `craftStatus=fail`. `effectiveCraft` clamps AE craft vs earth+staged; opaque `craftKnown=false` shows `Крафт (1)` only while the row is still short. Row status blinks `Крафт (n)` ↔ `Загружено (m)` (1 s each, orange/yellow) when both inbound and loaded; sys line shows live `крафт AE N в работе`, not a dead 60 s countdown.
+5. After the first craft probe, **unobtainable** ids (`craftStatus` no/fail or AE not craftable) are dropped from the shot even if some cargo is already staged (remainder does not block fire). If nothing remains, **no craft-wait / no launch prep** — idle + status `не шлём (нет в AE): …`.
+6. During craft-wait (**ALARM 60 s** / **WARN 120 s**, or **3 s** if no AE jobs) only for obtainable items: export AE → loaders (stock/`earth>0` first; skip full loaders; ~2 s cooldown after a zero-move so focus snaps do not re-spam); re-request craft as needed. **Collapse wait as soon as AE CPUs are idle** (sticky `req`/pending no longer holds the full timer after craft finishes). Title stays short (`сборка` / `загрузка`); status lines say `крафт AE` / `сборка пакета` / `выгрузка`. Debug ring under the table shows timings.
 7. **Fire** when the obtainable shot package sits in the loaders, or when every loader is cargo-full — but **not** while Earth still has obtainable stock/craft to push (`moreToLoad`). WARN zone rules unchanged; this only blocks early fire (e.g. diamond done, gold just merged). `загрузка` title only when loaders actually hold cargo. If the package cannot be finished after the wait, return to poll with a status note.
 8. Pulse relay → `cooldown | 80`. Flight is 60 s, so the next poll sees the delivery. No in-flight reserve. A failed relay pulse does not start the cooldown.
-9. **Parallel runtime**: `uiLoop` + `aeWatchLoop` + `moonWatchLoop` + `controlLoop`. Moon watch owns ender stock probes; control reads the cache (no competing rednet). AE watch refreshes Земля/Крафт (focus=active package, full every 8th; slower when idle). Control exports/crafts/fires without owning long AE/Moon scans. `requestCrafts` schedules **all** short package items in one pass, accounts for in-flight crafting (clamped), retries every 2 s. Snapshot: crafting-tasks first, `getItem` with sparse `sleep(0)` yields.
+9. **Parallel runtime**: `uiLoop` + `aeWatchLoop` + `moonWatchLoop` + `controlLoop`. Moon watch owns ender stock probes; control reads the cache (no competing rednet). AE watch refreshes Земля/Крафт (focus=active package; full every 8th, or every 12th when watchlist ≥30; slower when idle). Control exports/crafts/fires without owning long AE/Moon scans. `requestCrafts` schedules **all** short package items in one pass, accounts for in-flight crafting (clamped), retries every 2 s. Snapshot: crafting-tasks first, `getItem` with sparse `sleep(0)` yields.
 
 ## Watchlist defaults (`moon_supply_E_ctrl.cfg` only)
 
@@ -80,8 +80,11 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 | `gtceu:laminated_glass` | 128 |
 | `gtceu:double_titanium_tungsten_carbide_plate` | 128 |
 | `gtceu:tungsten_steel_plate` | 64 |
+| `gtceu:exquisite_ruby_gem` | 128 |
 | `gtceu:exquisite_amethyst_gem` | 128 |
 | `gtceu:iv_conveyor_module` | 32 |
+| `gtceu:iv_electric_piston` | 32 |
+| `tfg:ulv_universal_circuit` | 1024 |
 
 (TFG: CPU/RAM are `cpu_chip` / `ram_chip`, not `central_processing_unit` / `random_access_memory`. Gold is vanilla `minecraft:gold_ingot`. Smoky quartz lang rename — registry stays `nether_quartz`.)
 
