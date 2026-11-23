@@ -4,26 +4,26 @@ local monitor_ui = {}
 
 local NAMES = {
     ["gtceu:mv_conveyor_module"] = "конвейер MV",
-    ["gtceu:aluminium_ingot"] = "алюминий",
+    ["gtceu:aluminium_ingot"] = "слиток алюминия",
     ["gtceu:hv_robot_arm"] = "роборука HV",
-    ["gtceu:central_processing_unit"] = "процессор",
-    ["gtceu:stainless_steel_ingot"] = "нерж. сталь",
+    ["gtceu:cpu_chip"] = "процессор",
+    ["gtceu:stainless_steel_ingot"] = "слиток нерж. стали",
     ["gtceu:polyethylene_foil"] = "фольга ПЭ",
     ["minecraft:redstone"] = "редстоун",
     ["tfg:hv_universal_circuit"] = "схема HV",
     ["tfg:lv_universal_circuit"] = "схема LV",
     ["gtceu:mv_robot_arm"] = "роборука MV",
-    ["gtceu:random_access_memory"] = "память",
+    ["gtceu:ram_chip"] = "ОЗУ",
     ["gtceu:polyvinyl_chloride_foil"] = "фольга ПВХ",
     ["tfg:ev_universal_circuit"] = "схема EV",
     ["tfg:iv_universal_circuit"] = "схема IV",
-    ["gtceu:exquisite_quartzite_gem"] = "кварцит",
-    ["gtceu:exquisite_nether_quartz_gem"] = "дымч. кварц",
-    ["gtceu:exquisite_certus_quartz_gem"] = "сертис",
-    ["gtceu:diamond_plate"] = "алмаз пл.",
-    ["gtceu:silicon_plate"] = "кремний пл.",
-    ["tfc:metal/ingot/gold"] = "золото",
-    ["gtceu:dense_silicon_plate"] = "плотн. кремний",
+    ["gtceu:exquisite_quartzite_gem"] = "Кварц (Изыск.)",
+    ["gtceu:exquisite_nether_quartz_gem"] = "Дымч. кварц (Изыск.)",
+    ["gtceu:exquisite_certus_quartz_gem"] = "Истин. кварц (Изыск.)",
+    ["gtceu:diamond_plate"] = "пластина алмаз",
+    ["gtceu:silicon_plate"] = "пластина кремний",
+    ["minecraft:gold_ingot"] = "слиток золота",
+    ["gtceu:dense_silicon_plate"] = "плотн. пластина кремний",
     ["tfg:silica_aerogel"] = "аэрогель",
 }
 
@@ -36,11 +36,11 @@ local ORDER = {
     ["gtceu:mv_conveyor_module"] = { 2, 1 },
     ["gtceu:mv_robot_arm"] = { 2, 2 },
     ["gtceu:hv_robot_arm"] = { 2, 3 },
-    ["gtceu:central_processing_unit"] = { 2, 4 },
-    ["gtceu:random_access_memory"] = { 2, 5 },
-    ["gtceu:aluminium_ingot"] = { 3, 1 },
-    ["gtceu:stainless_steel_ingot"] = { 3, 2 },
-    ["tfc:metal/ingot/gold"] = { 3, 3 },
+    ["gtceu:cpu_chip"] = { 2, 4 },
+    ["gtceu:ram_chip"] = { 2, 5 },
+    ["minecraft:gold_ingot"] = { 3, 1 },
+    ["gtceu:aluminium_ingot"] = { 3, 2 },
+    ["gtceu:stainless_steel_ingot"] = { 3, 3 },
     ["gtceu:polyethylene_foil"] = { 4, 1 },
     ["gtceu:polyvinyl_chloride_foil"] = { 4, 2 },
     ["gtceu:silicon_plate"] = { 5, 1 },
@@ -250,13 +250,38 @@ function monitor_ui.stockColor(moon, target, zone)
     return colors.yellow
 end
 
+-- Soft bounce for live phases so the header does not look frozen.
+-- Fixed width (4 cells) keeps the rest of the title from shifting.
+local PULSE_FRAMES = { " ·  ", " ·· ", " ···", " ·· " }
+
+function monitor_ui.phasePulseIndex(phase, clock)
+    phase = tostring(phase or "")
+    if phase ~= "poll" and phase ~= "idle" then
+        return nil
+    end
+    clock = tonumber(clock) or os.clock()
+    return (math.floor(clock * 2.5) % #PULSE_FRAMES) + 1
+end
+
+function monitor_ui.phasePulseSuffix(phase, clock)
+    local i = monitor_ui.phasePulseIndex(phase, clock)
+    if not i then
+        return ""
+    end
+    return PULSE_FRAMES[i]
+end
+
 --- Status cell text + color from crafting / staged / AE availability.
-function monitor_ui.statusCell(row)
+-- phase "cooldown" (пауза): staged cargo was fired → «Отправлено», same yellow.
+function monitor_ui.statusCell(row, phase)
     row = row or {}
     local staged = math.max(0, math.floor(tonumber(row.staged) or 0))
     local crafting = math.max(0, math.floor(tonumber(row.crafting) or 0))
     local ae = tostring(row.ae or row.craft or "")
     if staged > 0 then
+        if phase == "cooldown" then
+            return ("Отправлено (%d)"):format(staged), colors.yellow
+        end
         return ("Загрузка (%d)"):format(staged), colors.yellow
     end
     if crafting > 0 then
@@ -268,6 +293,9 @@ function monitor_ui.statusCell(row)
     return "-", colors.white
 end
 
+-- setTextScale clears the monitor in CC — call once per peripheral name, never on rescan/rewrap.
+local scaledNames = {}
+
 function monitor_ui.wrap(name)
     if not name or not peripheral.isPresent(name) then
         return nil
@@ -276,32 +304,39 @@ function monitor_ui.wrap(name)
     if not mon or type(mon.setCursorPos) ~= "function" then
         return nil
     end
-    -- Scale once: setTextScale every frame causes visible flicker.
-    if mon._moonSupplyScale ~= 0.5 then
+    name = tostring(name)
+    if not scaledNames[name] then
         pcall(function()
             mon.setTextScale(0.5)
         end)
-        mon._moonSupplyScale = 0.5
+        scaledNames[name] = true
     end
+    mon._moonSupplyScale = 0.5
+    mon._moonSupplyName = name
     return mon
 end
 
---- state: { phase, mode, error, rows=[{name,moon,target,zone,earth,crafting,staged,ae}],
+-- Fixed band under the program header so the item table never jumps when messages appear.
+local SYS_LINES = 2
+local SYS_Y0 = 3 -- lines 3..4; table header at 5
+
+--- state: { phase, mode, error, messages={...}, wait_item, rows=[...],
 --          loaders_full, loaders_total, craft_left, craft_total, staged_total }
 function monitor_ui.draw(mon, state)
     if not mon then
         return
     end
     state = state or {}
-    if mon._moonSupplyScale ~= 0.5 then
-        pcall(function()
-            mon.setTextScale(0.5)
-        end)
-        mon._moonSupplyScale = 0.5
-    end
     local w, h = mon.getSize()
     w = tonumber(w) or 0
     h = tonumber(h) or 0
+
+    -- Skip rewriting lines that did not change (avoids visible "rebuild" flash).
+    local lineCache = mon._moonSupplyLineCache
+    if not lineCache or lineCache.w ~= w or lineCache.h ~= h then
+        lineCache = { w = w, h = h }
+        mon._moonSupplyLineCache = lineCache
+    end
 
     local function writeSeg(x, y, text, fg)
         if y < 1 or y > h or w < 1 or x > w then
@@ -331,6 +366,15 @@ function monitor_ui.draw(mon, state)
     end
 
     local function writeParts(y, parts)
+        local fp = tostring(y)
+        for i = 1, #parts do
+            local p = parts[i]
+            fp = fp .. "\0" .. tostring(p[1]) .. "\0" .. tostring(p[2] or "")
+        end
+        if lineCache[y] == fp then
+            return
+        end
+        lineCache[y] = fp
         local x = 1
         for i = 1, #parts do
             local p = parts[i]
@@ -342,19 +386,27 @@ function monitor_ui.draw(mon, state)
         finishLine(x, y)
     end
 
+    local function blankLine(y)
+        local fp = tostring(y) .. "\0"
+        if lineCache[y] == fp then
+            return
+        end
+        lineCache[y] = fp
+        finishLine(1, y)
+    end
+
     local modeKey = state.mode or "OK"
     local mode = MODE_RU[modeKey] or tostring(modeKey)
     local phaseKey = state.phase or "poll"
+    -- Title stays short. Craft timer / blockers / skip notes live in the sys status band.
     local title = { { "снабжение [" .. mode .. "] ", colors.white } }
     if phaseKey == "craft_wait" then
-        title[#title + 1] = { "крафт", colors.yellow }
-        if state.craft_left then
-            title[#title + 1] = { (" %.0f с"):format(state.craft_left), colors.lightGray }
-        end
-    elseif phaseKey == "loading" or phaseKey == "hold" then
-        title[#title + 1] = { "подготовка к запуску", colors.yellow }
+        title[#title + 1] = { "ожидание", colors.yellow }
+        title[#title + 1] = { monitor_ui.phasePulseSuffix("poll", state.clock), colors.lightGray }
+    elseif phaseKey == "loading" then
+        title[#title + 1] = { "загрузка", colors.yellow }
     elseif phaseKey == "settle" then
-        title[#title + 1] = { "подготовлено к запуску", colors.yellow }
+        title[#title + 1] = { "пуск", colors.yellow }
     elseif phaseKey == "fire" then
         title[#title + 1] = { "выстрел", colors.yellow }
     elseif phaseKey == "cooldown" then
@@ -364,8 +416,10 @@ function monitor_ui.draw(mon, state)
         end
     elseif phaseKey == "idle" then
         title[#title + 1] = { "покой", colors.white }
+        title[#title + 1] = { monitor_ui.phasePulseSuffix(phaseKey, state.clock), colors.lightGray }
     else
         title[#title + 1] = { "опрос", colors.white }
+        title[#title + 1] = { monitor_ui.phasePulseSuffix(phaseKey, state.clock), colors.lightGray }
     end
     writeParts(1, title)
 
@@ -386,17 +440,53 @@ function monitor_ui.draw(mon, state)
     }
     writeParts(2, meta)
 
-    local err = state.error and state.error ~= "" and errorLabel(state.error) or nil
-    if err then
-        writeSeg(1, 3, err, colors.orange)
+    -- Reserved STATUS band (always SYS_LINES tall): phase detail, blockers, errors.
+    local msgs = {}
+    local seen = {}
+    local function pushMsg(raw, keepRaw)
+        raw = tostring(raw or "")
+        if raw == "" or seen[raw] then
+            return
+        end
+        seen[raw] = true
+        msgs[#msgs + 1] = keepRaw and raw or errorLabel(raw)
+    end
+    if type(state.messages) == "table" then
+        for i = 1, #state.messages do
+            pushMsg(state.messages[i], true)
+        end
+    end
+    -- craft_wait timer also mirrored here when controller did not push messages yet
+    if phaseKey == "craft_wait" and state.craft_left and #msgs < SYS_LINES then
+        pushMsg(("ожидание AE %d с"):format(state.craft_left), true)
+    end
+    if state.wait_item and tostring(state.wait_item) ~= "" and #msgs < SYS_LINES then
+        pushMsg("ждём: " .. monitor_ui.itemLabel(state.wait_item), true)
+    end
+    pushMsg(state.error, false)
+    for i = 1, SYS_LINES do
+        local ySys = SYS_Y0 + i - 1
+        local text = msgs[i]
+        if text then
+            local fg = colors.lightGray
+            if state.error and errorLabel(state.error) == text then
+                fg = colors.orange
+            elseif text:find("нет в AE", 1, true) or text:find("не шлём", 1, true) then
+                fg = colors.orange
+            end
+            writeParts(ySys, { { text, fg } })
+        else
+            blankLine(ySys)
+        end
     end
 
-    local rows = monitor_ui.sortRows(state.rows or {})
+    -- Caller owns order (cfg skeleton sorted once). Do not re-sort every paint.
+    local rows = state.rows or {}
     local labels, moons, targets, earths, statuses, stockColors, statusColors =
         {}, {}, {}, {}, {}, {}, {}
     for i = 1, #rows do
         local r = rows[i]
-        labels[i] = monitor_ui.itemLabel(r.name)
+        labels[i] = r.label or monitor_ui.itemLabel(r.name)
         if r.zone == "?" then
             moons[i] = "н/д"
         else
@@ -404,7 +494,7 @@ function monitor_ui.draw(mon, state)
         end
         targets[i] = fmtNum(r.target)
         earths[i] = fmtNum(r.earth)
-        local st, sc = monitor_ui.statusCell(r)
+        local st, sc = monitor_ui.statusCell(r, phaseKey)
         statuses[i] = st
         statusColors[i] = sc
         stockColors[i] = monitor_ui.stockColor(r.moon, r.target, r.zone)
@@ -418,7 +508,27 @@ function monitor_ui.draw(mon, state)
     local moonW = colWidth(headMoon, moons, 4)
     local targetW = colWidth(headTarget, targets, 4)
     local earthW = colWidth(headEarth, earths, 5)
-    local statusW = colWidth(headStatus, statuses, 6)
+    -- Floor status width so short/long labels do not shift columns every paint.
+    local statusW = colWidth(headStatus, statuses, ulen("Отправлено (9999)"))
+    -- Sticky widths: expand only, never shrink mid-session (column dance looks like rebuild).
+    local layout = mon._moonSupplyLayout
+    if not layout or layout.monW ~= w then
+        layout = {
+            monW = w,
+            moonW = moonW,
+            targetW = targetW,
+            earthW = earthW,
+            statusW = statusW,
+        }
+        mon._moonSupplyLayout = layout
+    else
+        layout.moonW = math.max(layout.moonW, moonW)
+        layout.targetW = math.max(layout.targetW, targetW)
+        layout.earthW = math.max(layout.earthW, earthW)
+        layout.statusW = math.max(layout.statusW, statusW)
+    end
+    moonW, targetW, earthW, statusW =
+        layout.moonW, layout.targetW, layout.earthW, layout.statusW
     local gaps = 4
     local nameW = w - moonW - targetW - earthW - statusW - gaps
     if nameW < 8 then
@@ -426,6 +536,16 @@ function monitor_ui.draw(mon, state)
     end
 
     local function writeProps(y, name, moon, target, earth, status, cName, cMoon, cTarget, cEarth, cStatus)
+        local fp = table.concat({
+            tostring(y),
+            tostring(name), tostring(moon), tostring(target), tostring(earth), tostring(status),
+            tostring(cName), tostring(cMoon), tostring(cTarget), tostring(cEarth), tostring(cStatus),
+            tostring(nameW), tostring(moonW), tostring(targetW), tostring(earthW), tostring(statusW),
+        }, "\0")
+        if lineCache[y] == fp then
+            return
+        end
+        lineCache[y] = fp
         local x = 1
         x = writeSeg(x, y, ljust(name, nameW), cName)
         x = writeSeg(x, y, " ", cName)
@@ -439,11 +559,7 @@ function monitor_ui.draw(mon, state)
         finishLine(x, y)
     end
 
-    local y = err and 4 or 3
-    if not err then
-        -- Clear stale error line when the fault goes away.
-        finishLine(1, 3)
-    end
+    local y = SYS_Y0 + SYS_LINES
     writeProps(
         y,
         headName, headMoon, headTarget, headEarth, headStatus,
@@ -462,12 +578,9 @@ function monitor_ui.draw(mon, state)
             sc, sc, sc, colors.white, statusColors[i]
         )
         y = y + 1
-        if i % 8 == 0 then
-            sleep(0)
-        end
     end
     while y <= h do
-        finishLine(1, y)
+        blankLine(y)
         y = y + 1
     end
 end

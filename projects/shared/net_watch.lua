@@ -13,29 +13,35 @@ function net_watch.flushEvents(tag)
     end
 end
 
---- Sleep seconds; return true if a peripheral attach/detach arrived (wakes early).
+--- Sleep seconds; return true, lastName if a peripheral attach/detach arrived.
+-- Optional onHotplug(name) runs for every attach/detach in the window (burst-safe).
 -- Unlike os.sleep / sleep(), does NOT discard peripheral events (pullEvent filter).
-function net_watch.sleepWatch(seconds)
+function net_watch.sleepWatch(seconds, onHotplug)
     local timer = os.startTimer(tonumber(seconds) or 0)
     local hotplug = false
+    local hotName = nil
     while true do
         local ev, p1 = os.pullEvent()
         if ev == "peripheral" or ev == "peripheral_detach" then
             hotplug = true
+            hotName = p1
+            if type(onHotplug) == "function" then
+                onHotplug(p1)
+            end
             -- Keep waiting for our timer so a burst of attaches still yields once,
             -- but report hotplug so callers can rescan.
         elseif ev == "timer" and p1 == timer then
-            return hotplug
+            return hotplug, hotName
         end
     end
 end
 
 --- Zero-tick yield that preserves peripheral events (use instead of sleep(0)).
-function net_watch.yieldWatch()
-    return net_watch.sleepWatch(0)
+function net_watch.yieldWatch(onHotplug)
+    return net_watch.sleepWatch(0, onHotplug)
 end
 
---- Sleep full duration; call onHotplug() on attach/detach but do not wake early.
+--- Sleep full duration; call onHotplug(name) on attach/detach but do not wake early.
 function net_watch.sleepDrain(seconds, onHotplug)
     local timer = os.startTimer(seconds)
     while true do
@@ -44,7 +50,7 @@ function net_watch.sleepDrain(seconds, onHotplug)
             return
         elseif ev == "peripheral" or ev == "peripheral_detach" then
             if type(onHotplug) == "function" then
-                onHotplug()
+                onHotplug(p1)
             end
         end
     end

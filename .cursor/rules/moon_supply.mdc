@@ -10,7 +10,7 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 ## Non-goals
 
 - Fluids; full AE2-Moon dump; Moon receiver control
-- In-flight accounting (flight 60 s, send pause 70 s; the next poll sees Moon AE already updated)
+- In-flight accounting (flight 60 s, send pause 80 s; the next poll sees Moon AE already updated)
 - Legacy fire-by-full as the primary mode for this sender (use `moon_supply` earth; standalone `railgun` is manual/legacy)
 
 ## Layout
@@ -37,11 +37,11 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
    - **WARN** if no ALARM but any `moon < target`
    - **OK** → idle
 3. Build a shot package from deficits. Within a zone, cfg order. In **ALARM**, alarm items load before warn items of the same shot. **WARN** sends warn deficits only.
-4. Missing on Earth: check craftable → `craftItem`; else status «Нет в AE». Amounts already in the buffer, loaders, or an active AE craft job (`isItemCrafting` / craft-task list) are not crafted again. A short local reserve covers the gap before the job appears on the bridge. Monitor shows `Крафт (x)` / `Загрузка (y)`.
-5. During craft-wait (**ALARM 60 s** / **WARN 120 s**): export AE → loaders; re-request craft as needed. Export only the gap still missing after loader (+ optional buffer) counts.
-6. **Fire** when the shot package sits entirely in the loaders, or when every loader is cargo-full (partial stacks OK). One empty slot is reserved for a GT programmed circuit. `*_universal_circuit` is cargo. No min-fill % heuristic.
-7. Craft-wait only limits craft requests. A ready package or a full gun fires during the wait. After the wait, keep pulling Earth stock. If Earth cannot finish the package and the loaders are not full, leave the cargo and return to poll. That remainder does not launch.
-8. Pulse relay → `cooldown | 70`. Flight is 60 s, so the next poll sees the delivery. No in-flight reserve. A failed relay pulse does not start the cooldown.
+4. Missing on Earth: check craftable → `craftItem`; else status «Нет в AE». Amounts already in the buffer, loaders, or an active AE craft job (`isItemCrafting` / craft-task list) are not crafted again. A short local reserve covers the gap before the job appears on the bridge. Monitor row status: `Крафт (x)` / `Загрузка (y)` / `Отправлено (y)` on cooldown.
+5. After the first craft probe, **unobtainable** ids are dropped from the shot. If nothing remains, **no craft-wait / no launch prep** — idle + status `не шлём (нет в AE): …`.
+6. During craft-wait (**ALARM 60 s** / **WARN 120 s**) only for obtainable items: export AE → loaders; re-request craft as needed. Title stays short (`ожидание` / `загрузка`); timers and `ждём:` / skip notes go to the **2 sys status lines**.
+7. **Fire** when the obtainable shot package sits in the loaders, or when every loader is cargo-full. `загрузка` title only when loaders actually hold cargo. If the package cannot be finished after the wait, return to poll with a status note.
+8. Pulse relay → `cooldown | 80`. Flight is 60 s, so the next poll sees the delivery. No in-flight reserve. A failed relay pulse does not start the cooldown.
 
 ## Watchlist defaults (`moon_supply_E_ctrl.cfg` only)
 
@@ -50,14 +50,14 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 | `gtceu:mv_conveyor_module` | 128 |
 | `gtceu:aluminium_ingot` | 1024 |
 | `gtceu:hv_robot_arm` | 64 |
-| `gtceu:central_processing_unit` | 256 |
+| `gtceu:cpu_chip` | 256 |
 | `gtceu:stainless_steel_ingot` | 1024 |
 | `gtceu:polyethylene_foil` | 2048 |
 | `minecraft:redstone` | 2048 |
 | `tfg:hv_universal_circuit` | 512 |
 | `tfg:lv_universal_circuit` | 1024 |
 | `gtceu:mv_robot_arm` | 128 |
-| `gtceu:random_access_memory` | 256 |
+| `gtceu:ram_chip` | 256 |
 | `gtceu:polyvinyl_chloride_foil` | 2048 |
 | `tfg:ev_universal_circuit` | 256 |
 | `tfg:iv_universal_circuit` | 128 |
@@ -66,11 +66,11 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 | `gtceu:exquisite_certus_quartz_gem` | 512 |
 | `gtceu:diamond_plate` | 1024 |
 | `gtceu:silicon_plate` | 1024 |
-| `tfc:metal/ingot/gold` | 1024 |
+| `minecraft:gold_ingot` | 1024 |
 | `gtceu:dense_silicon_plate` | 128 |
 | `tfg:silica_aerogel` | 1024 |
 
-(Smoky quartz in TFG is a lang rename of nether quartz — registry stays `nether_quartz`. Quartz/gold ids: verify JEI if needed.)
+(TFG: CPU/RAM are `cpu_chip` / `ram_chip`, not `central_processing_unit` / `random_access_memory`. Gold is vanilla `minecraft:gold_ingot`. Smoky quartz lang rename — registry stays `nether_quartz`.)
 
 ## Modules
 
@@ -80,8 +80,8 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 - `railgun_hw.lua` — loader full + relay pulse (from legacy `railgun`)
 - `discover.lua` — bridge, modem, monitor, buffer, loaders, relay
 - `planner.lua` — ALARM/WARN, package, craft-wait policy
-- `monitor_ui.lua` — Earth status: Предмет/Луна/Цель red <25% / yellow <100% / green ≥100%; Земля white; Статус «Крафт (n)» / «Загрузка (n)» yellow, «Нет в AE» red; header tracks craft + staged totals
-- Earth entry runs **parallel** control + UI (paint ~0.25 s); no second `shell.run` / tab needed
+- `monitor_ui.lua` — Earth status: Предмет/Луна/Цель red <25% / yellow <100% / green ≥100%; Земля white; Статус «Крафт (n)» / «Загрузка (n)» yellow, on cooldown «Отправлено (n)» yellow, «Нет в AE» red; header tracks craft + staged totals + blocking `wait_item`; **2 fixed sys/error lines**; sticky column widths; per-line paint cache; `setTextScale` once per monitor name. Row **order is fixed** (caller skeleton); draw does not re-sort
+- Earth entry: `uiRows` skeleton from cfg.items (fingerprint); ticks only patch statuses. **Cfg hot-reload** each poll (`loadEarth`): watchlist fingerprint change rebuilds the skeleton; bridge/monitor/loaders/relay/buffer/modem change sets dirty rescan. Tunables (cooldown, craft_wait, red_frac, …) apply immediately. Parallel UI + control
 
 ## Deploy
 

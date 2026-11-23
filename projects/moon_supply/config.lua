@@ -12,14 +12,14 @@ local DEFAULT_ITEMS = {
     { name = "gtceu:mv_conveyor_module", target = 128 },
     { name = "gtceu:aluminium_ingot", target = 1024 },
     { name = "gtceu:hv_robot_arm", target = 64 },
-    { name = "gtceu:central_processing_unit", target = 256 },
+    { name = "gtceu:cpu_chip", target = 256 },
     { name = "gtceu:stainless_steel_ingot", target = 1024 },
     { name = "gtceu:polyethylene_foil", target = 2048 },
     { name = "minecraft:redstone", target = 2048 },
     { name = "tfg:hv_universal_circuit", target = 512 },
     { name = "tfg:lv_universal_circuit", target = 1024 },
     { name = "gtceu:mv_robot_arm", target = 128 },
-    { name = "gtceu:random_access_memory", target = 256 },
+    { name = "gtceu:ram_chip", target = 256 },
     { name = "gtceu:polyvinyl_chloride_foil", target = 2048 },
     { name = "tfg:ev_universal_circuit", target = 256 },
     { name = "tfg:iv_universal_circuit", target = 128 },
@@ -28,7 +28,7 @@ local DEFAULT_ITEMS = {
     { name = "gtceu:exquisite_certus_quartz_gem", target = 512 },
     { name = "gtceu:diamond_plate", target = 1024 },
     { name = "gtceu:silicon_plate", target = 1024 },
-    { name = "tfc:metal/ingot/gold", target = 1024 },
+    { name = "minecraft:gold_ingot", target = 1024 },
     { name = "gtceu:dense_silicon_plate", target = 128 },
     { name = "tfg:silica_aerogel", target = 1024 },
 }
@@ -56,7 +56,7 @@ local function emptyEarth()
         pulse = 3,
         settle = 2,
         poll = 10,
-        cooldown = 70,
+        cooldown = 80,
         red_frac = 0.25,
         craft_wait_red = 60,
         craft_wait_green = 120,
@@ -244,6 +244,32 @@ function config.itemIds(cfg)
         ids[i] = items[i].name
     end
     return ids
+end
+
+--- Watchlist fingerprint: order + id + target. UI skeleton rebuilds when this changes.
+function config.itemsFingerprint(items)
+    items = items or {}
+    local parts = {}
+    for i = 1, #items do
+        local it = items[i]
+        parts[i] = tostring(it.name) .. "=" .. tostring(it.target)
+    end
+    return table.concat(parts, ";")
+end
+
+--- Hardware / discovery keys — change forces a peripheral rescan.
+function config.hwFingerprint(cfg)
+    cfg = cfg or {}
+    return table.concat({
+        tostring(cfg.bridge or ""),
+        tostring(cfg.monitor or ""),
+        tostring(cfg.modem or ""),
+        tostring(cfg.buffer or ""),
+        tostring(cfg.loader_prefix or ""),
+        tostring(cfg.expected or ""),
+        tostring(cfg.relay or ""),
+        tostring(cfg.relay_side or ""),
+    }, "|")
 end
 
 return config

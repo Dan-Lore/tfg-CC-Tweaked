@@ -28,19 +28,44 @@ local mode = planner.ZONE_OK
 local lastError = ""
 local lastFireAt = 0
 local settleSince = nil
-local uiRows = {}
+local uiRows = {} -- fixed skeleton from cfg.items; only statuses mutate
+local uiItemsSig = nil
 local craftStatus = {} -- name -> string
 local craftPending = {} -- name -> { count=, expires=, grace= } local reserve until AE reports the job
 local moonHostId = cfg.moon_id
 local lastCraftAt = 0
-local lastFullUiAt = 0
 local uiLoadersFull = 0
 local uiLoadersTotal = 0
 local uiTimerEnd = nil -- os.clock deadline → craft_left on monitor
+local uiWaitName = nil -- obtainable item still short (status line, not title)
+local uiStatusLines = {} -- extra program status lines under the header
+local lastPaintKey = nil
 local CRAFT_PENDING_S = 180
 local CRAFT_GRACE_S = 15
-local UI_FULL_REFRESH_S = 2.5
 local UI_PAINT_S = 0.25
+
+local function setStatusLines(a, b, c)
+    -- Accept a list table or up to 3 string args (CC-safe, no table.unpack).
+    uiStatusLines = {}
+    local function push(s)
+        if s and tostring(s) ~= "" then
+            uiStatusLines[#uiStatusLines + 1] = tostring(s)
+        end
+    end
+    if type(a) == "table" then
+        for i = 1, #a do
+            push(a[i])
+        end
+        return
+    end
+    push(a)
+    push(b)
+    push(c)
+end
+
+local function clearStatusLines()
+    uiStatusLines = {}
+end
 
 local function setError(msg)
     lastError = tostring(msg or "")
@@ -50,6 +75,78 @@ local function shortErr(name, err)
     return monitor_ui.itemLabel(name) .. ": " .. tostring(err)
 end
 
+--- Build the monitor row list once from cfg. Rebuild only if the watchlist fingerprint changes.
+local function ensureUiSkeleton()
+    local sig = configMod.itemsFingerprint(cfg.items)
+    if uiItemsSig == sig and #uiRows > 0 then
+        return false
+    end
+    local base = {}
+    for i = 1, #cfg.items do
+        local it = cfg.items[i]
+        base[i] = {
+            name = it.name,
+            label = monitor_ui.itemLabel(it.name),
+            moon = 0,
+            target = it.target,
+            zone = "?",
+            earth = 0,
+            crafting = 0,
+            staged = 0,
+            ae = nil,
+        }
+    end
+    uiRows = monitor_ui.sortRows(base)
+    uiItemsSig = sig
+    lastPaintKey = nil
+    if mon then
+        mon._moonSupplyLineCache = nil
+        mon._moonSupplyLayout = nil
+    end
+    return true
+end
+
+--- Re-read moon_supply_E_ctrl.cfg from disk. Safe to call every poll / shot loop.
+-- Watchlist change → rebuild UI skeleton. Hardware change → rescan peripherals.
+-- Returns itemsChanged, ok.
+local function reloadCfg()
+    local ok, fresh = pcall(configMod.loadEarth)
+    if not ok then
+        setError("cfg: " .. tostring(fresh))
+        return false, false
+    end
+    if type(fresh) ~= "table" or type(fresh.items) ~= "table" then
+        setError("cfg: bad earth config")
+        return false, false
+    end
+
+    local oldItems = configMod.itemsFingerprint(cfg.items)
+    local oldHw = configMod.hwFingerprint(cfg)
+    local newItems = configMod.itemsFingerprint(fresh.items)
+    local newHw = configMod.hwFingerprint(fresh)
+    local itemsChanged = newItems ~= oldItems
+
+    cfg = fresh
+    if cfg.moon_id then
+        moonHostId = cfg.moon_id
+    end
+
+    if newHw ~= oldHw then
+        dirty = true
+        print("moon_supply earth: cfg hardware changed — rescan")
+    end
+
+    if itemsChanged then
+        craftStatus = {}
+        craftPending = {}
+        ensureUiSkeleton()
+        print(("moon_supply earth: watchlist reloaded (%d items)"):format(#cfg.items))
+    else
+        ensureUiSkeleton()
+    end
+    return itemsChanged, true
+end
+
 local function openModem()
     local side = discover.modem(cfg)
     if not side or not peripheral.isPresent(side) then
@@ -57,6 +154,42 @@ local function openModem()
     end
     rednet.open(side)
     print("moon_supply earth: modem " .. tostring(side))
+end
+
+--- Only railgun/ME/monitor peripherals should force a full rescan.
+-- Random AE bus attach/detach otherwise re-wraps the monitor and setTextScale clears it.
+local function relevantHotplug(name)
+    name = tostring(name or "")
+    if name == "" then
+        return false
+    end
+    if name == (net.monitor or cfg.monitor) or name == cfg.monitor then
+        return true
+    end
+    if name == (net.bridge or cfg.bridge) or name == cfg.bridge then
+        return true
+    end
+    if name == (net.relay or "") or name == (cfg.relay or "") then
+        return true
+    end
+    if name == (net.buffer or "") or name == (cfg.buffer or "") then
+        return true
+    end
+    local prefix = tostring(cfg.loader_prefix or "")
+    if prefix ~= "" and name:sub(1, #prefix) == prefix then
+        return true
+    end
+    local modem = tostring(cfg.modem or "")
+    if modem ~= "" and (name == modem or name:find(modem, 1, true)) then
+        return true
+    end
+    return false
+end
+
+local function noteHotplug(name)
+    if relevantHotplug(name) then
+        dirty = true
+    end
 end
 
 local function rescan(reason)
@@ -69,7 +202,14 @@ local function rescan(reason)
         local p, n = ae_bridge.wrap(cfg.bridge)
         bridge, net.bridge = p, n
     end
-    mon = monitor_ui.wrap(net.monitor or cfg.monitor)
+    local monName = net.monitor or cfg.monitor
+    -- Re-wrap only when the monitor name changed or the old wrap is gone.
+    -- monitor_ui.wrap never re-calls setTextScale for the same name (that wipes the screen).
+    if not mon or mon._moonSupplyName ~= tostring(monName or "")
+        or not peripheral.isPresent(monName) then
+        mon = monitor_ui.wrap(monName)
+        lastPaintKey = nil
+    end
     dirty = false
     settleSince = nil
     if reason then
@@ -152,60 +292,68 @@ local function noteCraftPending(name, count, now)
     }
 end
 
-local function refreshUiRows(rows, earthBridge)
-    uiRows = {}
+--- Patch status fields in place. Never replaces uiRows (stable list for the monitor).
+-- assessRows: optional planner.assess output (moon/target/zone). nil → leave moon fields.
+-- opts.light: only refresh staged (tight export loop).
+local function updateUiStatuses(assessRows, earthBridge, opts)
+    opts = opts or {}
+    ensureUiSkeleton()
+    local byName = nil
+    if assessRows then
+        byName = {}
+        for i = 1, #assessRows do
+            local r = assessRows[i]
+            byName[r.name] = r
+        end
+    end
     local stagedMap, bufMap = stagedCounts()
     local now = os.clock()
-    for i = 1, #rows do
-        local r = rows[i]
-        local name = r.name
-        local craftingAmt, craftKnown = ae_bridge.craftingAmount(earthBridge, name)
-        local reserved = pendingCover(name, now)
-        craftingAmt = math.max(tonumber(craftingAmt) or 0, reserved)
-        -- Job visible to AE but amount opaque: still show Крафт (n).
-        if not craftKnown and craftingAmt < 1 then
-            craftingAmt = 1
-        end
-        local stagedAmt = countOf(stagedMap, name) + countOf(bufMap, name)
-        local ae = craftStatus[name]
-        if ae == "ok" or ae == "req" then
-            ae = nil
-        end
-        uiRows[i] = {
-            name = name,
-            moon = r.moon,
-            target = r.target,
-            zone = r.zone,
-            earth = ae_bridge.getItemAmount(earthBridge, name),
-            crafting = craftingAmt,
-            staged = stagedAmt,
-            ae = ae,
-        }
-        -- Yield often so the parallel UI coroutine can paint.
-        if i % 2 == 0 then
-            sleep(0)
-        end
-    end
-    lastFullUiAt = os.clock()
-end
-
---- Fast path: only recount loader/buffer cargo into existing uiRows.
-local function patchStagedIntoUi()
-    local staged, buf = stagedCounts()
+    local light = opts.light == true
     for i = 1, #uiRows do
-        local name = uiRows[i].name
-        uiRows[i].staged = countOf(staged, name) + countOf(buf, name)
+        local row = uiRows[i]
+        local name = row.name
+        if byName and byName[name] then
+            local a = byName[name]
+            row.moon = a.moon
+            row.target = a.target
+            row.zone = a.zone
+        end
+        row.staged = countOf(stagedMap, name) + countOf(bufMap, name)
+        if not light then
+            local craftingAmt, craftKnown = ae_bridge.craftingAmount(earthBridge, name)
+            local reserved = pendingCover(name, now)
+            craftingAmt = math.max(tonumber(craftingAmt) or 0, reserved)
+            if not craftKnown and craftingAmt < 1 then
+                craftingAmt = 1
+            end
+            row.crafting = craftingAmt
+            row.earth = ae_bridge.getItemAmount(earthBridge, name)
+            local ae = craftStatus[name]
+            if ae == "ok" or ae == "req" then
+                ae = nil
+            end
+            row.ae = ae
+        end
     end
-    return staged, buf
+    return stagedMap, bufMap
 end
 
-local function refreshUiRowsMaybe(rows, earthBridge, force)
-    local now = os.clock()
-    if force or (now - lastFullUiAt) >= UI_FULL_REFRESH_S or #uiRows == 0 then
-        refreshUiRows(rows, earthBridge)
-        return
+--- Items we cannot obtain right now must not block the shot forever.
+local function unavailableSkip()
+    local skip = {}
+    for i = 1, #uiRows do
+        local r = uiRows[i]
+        local ae = tostring(r.ae or "")
+        if ae == "no" or ae == "fail" then
+            local crafting = math.floor(tonumber(r.crafting) or 0)
+            local staged = math.floor(tonumber(r.staged) or 0)
+            local earth = math.floor(tonumber(r.earth) or 0)
+            if crafting < 1 and staged < 1 and earth < 1 then
+                skip[r.name] = true
+            end
+        end
     end
-    patchStagedIntoUi()
+    return skip
 end
 
 local function uiTotals()
@@ -226,8 +374,6 @@ local function snapshotLoaders()
     end
 end
 
-local lastPaintKey = nil
-
 --- Paint from shared state only (no AE). Safe to call from the UI coroutine.
 local function drawUi()
     if not mon then
@@ -241,15 +387,25 @@ local function drawUi()
             craftLeft = math.floor(left + 0.5)
         end
     end
+    local now = os.clock()
+    local pulsePhase = phase
+    if phase == "craft_wait" then
+        pulsePhase = "poll" -- reuse live pulse while waiting on AE
+    end
+    local pulse = monitor_ui.phasePulseIndex(pulsePhase, now) or "-"
+    local statusKey = table.concat(uiStatusLines, "/")
     local key = table.concat({
         tostring(phase),
         tostring(mode),
         tostring(lastError),
+        tostring(uiWaitName or ""),
+        tostring(statusKey),
         tostring(uiLoadersFull),
         tostring(uiLoadersTotal),
         tostring(craftLeft or "-"),
         tostring(craftTotal),
         tostring(stagedTotal),
+        tostring(pulse),
         tostring(#uiRows),
     }, "|")
     for i = 1, #uiRows do
@@ -270,12 +426,15 @@ local function drawUi()
         phase = phase,
         mode = mode,
         error = lastError,
+        wait_item = uiWaitName,
+        messages = uiStatusLines,
         rows = uiRows,
         loaders_full = uiLoadersFull,
         loaders_total = uiLoadersTotal,
         craft_left = craftLeft,
         craft_total = craftTotal,
         staged_total = stagedTotal,
+        clock = now,
     })
 end
 
@@ -303,7 +462,11 @@ local function requestCrafts(wants, order, force)
                 local missing = need - have - countOf(staged, name) - countOf(buf, name)
                     - crafting - reserved
                 if missing > 0 then
+                    -- Some AP builds reject large craftable probes; fall back to count=1.
                     local okCraft, why = ae_bridge.isItemCraftable(bridge, name, missing)
+                    if not okCraft and missing > 1 then
+                        okCraft, why = ae_bridge.isItemCraftable(bridge, name, 1)
+                    end
                     if not okCraft then
                         craftStatus[name] = "no"
                         -- Wrong id / no pattern: status column only (no orange banner spam).
@@ -437,30 +600,94 @@ local function tryFire()
     return true
 end
 
+local function formatSkipStatus(skipNames)
+    if not skipNames or #skipNames == 0 then
+        return nil
+    end
+    local labels = {}
+    local n = math.min(#skipNames, 3)
+    for i = 1, n do
+        labels[i] = monitor_ui.itemLabel(skipNames[i])
+    end
+    -- Not "skipped somewhere" — excluded from this shot because AE has no stock/pattern.
+    local s = "не шлём (нет в AE): " .. table.concat(labels, ", ")
+    if #skipNames > 3 then
+        s = s .. "…"
+    end
+    return s
+end
+
 local function runShotCycle(rows, shotMode)
     mode = shotMode
     local wants, order = planner.packageWants(rows, shotMode)
     if #order == 0 then
         phase = "idle"
         uiTimerEnd = nil
+        uiWaitName = nil
+        clearStatusLines()
         return
     end
 
+    local fullOrder = {}
+    for i = 1, #order do
+        fullOrder[i] = order[i]
+    end
+
     craftStatus = {}
+    requestCrafts(wants, order, true)
+    updateUiStatuses(rows, bridge)
+    snapshotLoaders()
+
+    local skip = unavailableSkip()
+    local skipNames = planner.skippedNames(fullOrder, skip)
+    wants, order = planner.filterObtainable(wants, order, skip)
+
+    if #order == 0 then
+        -- Nothing craftable/exportable — do not fake a craft-wait or launch prep.
+        phase = "idle"
+        uiTimerEnd = nil
+        uiWaitName = nil
+        setStatusLines(formatSkipStatus(skipNames) or "нечего отправить")
+        return
+    end
+
     local waitS = planner.craftWaitSeconds(cfg, shotMode)
     local waitDeadline = os.clock() + waitS
     uiTimerEnd = waitDeadline
-
     phase = "craft_wait"
-    requestCrafts(wants, order, true)
-    refreshUiRows(rows, bridge)
-    snapshotLoaders()
+    do
+        local staged0 = select(1, stagedCounts())
+        uiWaitName = planner.waitItem(wants, order, staged0, skip)
+        local lines = {}
+        if waitS > 0 then
+            lines[#lines + 1] = ("ожидание AE до %.0f с"):format(waitS)
+        end
+        if uiWaitName then
+            lines[#lines + 1] = "ждём: " .. monitor_ui.itemLabel(uiWaitName)
+        end
+        local skipLine = formatSkipStatus(skipNames)
+        if skipLine then
+            lines[#lines + 1] = skipLine
+        end
+        setStatusLines(lines)
+    end
 
     while true do
+        local itemsChanged = reloadCfg()
+        if itemsChanged then
+            phase = "poll"
+            uiTimerEnd = nil
+            uiWaitName = nil
+            clearStatusLines()
+            return
+        end
+
         if dirty then
             rescan("hotplug")
             if not bridge then
                 setError("нет ME-моста")
+                uiWaitName = nil
+                clearStatusLines()
                 return
             end
         end
@@ -472,19 +699,61 @@ local function runShotCycle(rows, shotMode)
             uiTimerEnd = waitDeadline
             requestCrafts(wants, order, false)
         else
-            phase = "loading"
             uiTimerEnd = nil
         end
 
         local okExport = exportAndPush(wants, order)
-        local staged, buf = patchStagedIntoUi()
-        local satisfied = planner.packageDone(wants, staged)
+        local staged, buf = updateUiStatuses(rows, bridge)
+        skip = unavailableSkip()
+        wants, order = planner.filterObtainable(wants, order, skip)
+        if #order == 0 then
+            phase = "idle"
+            uiTimerEnd = nil
+            uiWaitName = nil
+            setStatusLines(formatSkipStatus(planner.skippedNames(fullOrder, skip)) or "нечего отправить")
+            return
+        end
+
+        local satisfied = planner.packageDone(wants, staged, skip)
+        uiWaitName = satisfied and nil or planner.waitItem(wants, order, staged, skip)
         local full = railgun_hw.allFull(net.loaders, cfg.expected)
         snapshotLoaders()
-        refreshUiRowsMaybe(rows, bridge, false)
+
+        local stagedTotal = 0
+        for i = 1, #uiRows do
+            stagedTotal = stagedTotal + (tonumber(uiRows[i].staged) or 0)
+        end
+
+        if not inCraftWait then
+            if stagedTotal > 0 or full then
+                phase = "loading"
+            else
+                phase = "poll"
+            end
+        end
+
+        do
+            local lines = {}
+            if inCraftWait and uiTimerEnd then
+                local left = math.max(0, math.floor(uiTimerEnd - os.clock() + 0.5))
+                lines[#lines + 1] = ("ожидание AE %d с"):format(left)
+            elseif phase == "loading" then
+                lines[#lines + 1] = ("в лоадерах %d"):format(stagedTotal)
+            end
+            if uiWaitName then
+                lines[#lines + 1] = "ждём: " .. monitor_ui.itemLabel(uiWaitName)
+            end
+            local skipLine = formatSkipStatus(planner.skippedNames(fullOrder, skip))
+            if skipLine then
+                lines[#lines + 1] = skipLine
+            end
+            setStatusLines(lines)
+        end
 
         if planner.shouldFire(satisfied, full) then
             if tryFire() then
+                uiWaitName = nil
+                clearStatusLines()
                 return
             end
         else
@@ -492,22 +761,26 @@ local function runShotCycle(rows, shotMode)
             if not okExport then
                 phase = "poll"
                 uiTimerEnd = nil
+                uiWaitName = nil
+                clearStatusLines()
                 return
             end
             if planner.shouldYield(inCraftWait, canLoadMore(wants, order, staged, buf), satisfied, full) then
-                phase = "hold"
+                phase = "poll"
                 uiTimerEnd = nil
+                uiWaitName = nil
+                setStatusLines("пакет не собран — в опросе", formatSkipStatus(planner.skippedNames(fullOrder, skip)))
                 return
             end
         end
 
-        if net_watch.sleepWatch(0.5) then
-            dirty = true
-        end
+        net_watch.sleepWatch(0.5, noteHotplug)
     end
 end
 
 local function tick()
+    reloadCfg()
+
     if not ensureNet() then
         phase = "poll"
         setError("нет лоадеров")
@@ -537,29 +810,26 @@ local function tick()
     uiTimerEnd = nil
     local stocks = fetchMoon()
     if not stocks then
-        -- still show cfg items with unknown moon
-        local rows = {}
-        for i = 1, #cfg.items do
-            local it = cfg.items[i]
-            rows[i] = {
-                name = it.name,
-                moon = 0,
-                target = it.target,
-                zone = "?",
-            }
+        -- cfg skeleton stays; mark moon unknown and refresh Earth/craft statuses
+        ensureUiSkeleton()
+        for i = 1, #uiRows do
+            uiRows[i].moon = 0
+            uiRows[i].zone = "?"
         end
-        refreshUiRows(rows, bridge)
+        updateUiStatuses(nil, bridge)
         snapshotLoaders()
         return
     end
 
     local rows, shotMode = planner.assess(cfg.items, stocks, cfg.red_frac)
     mode = shotMode
-    refreshUiRows(rows, bridge)
+    updateUiStatuses(rows, bridge)
     snapshotLoaders()
 
     if shotMode == planner.ZONE_OK then
         phase = "idle"
+        uiWaitName = nil
+        clearStatusLines()
         return
     end
 
@@ -573,9 +843,7 @@ local function controlLoop()
             setError(tostring(err))
             print("moon_supply earth: " .. tostring(err))
         end
-        if net_watch.sleepWatch(cfg.poll) then
-            dirty = true
-        end
+        net_watch.sleepWatch(cfg.poll, noteHotplug)
     end
 end
 
@@ -600,6 +868,7 @@ rescan("start")
 net_watch.flushEvents("moon_supply_flush")
 dirty = false
 snapshotLoaders()
+ensureUiSkeleton()
 pcall(drawUi)
 
 print("moon_supply earth: parallel UI + control")

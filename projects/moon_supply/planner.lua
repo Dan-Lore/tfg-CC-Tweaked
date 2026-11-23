@@ -94,14 +94,68 @@ function planner.packageWants(rows, mode)
 end
 
 --- have: name -> count already in the loaders.
-function planner.packageDone(wants, have)
+-- skip[name]=true → ignore (e.g. «Нет в AE» / not craftable) so a partial package can fire.
+function planner.packageDone(wants, have, skip)
     have = have or {}
+    skip = skip or {}
+    local any = false
     for name, want in pairs(wants) do
-        if (tonumber(have[name]) or 0) < (tonumber(want) or 0) then
-            return false
+        if not skip[name] then
+            any = true
+            if (tonumber(have[name]) or 0) < (tonumber(want) or 0) then
+                return false
+            end
         end
     end
-    return true
+    return any
+end
+
+--- First obtainable package item still short in the loaders. Never returns skipped («Нет в AE»).
+function planner.waitItem(wants, order, have, skip)
+    have = have or {}
+    skip = skip or {}
+    order = order or {}
+    for i = 1, #order do
+        local name = order[i]
+        local want = tonumber(wants and wants[name]) or 0
+        if want > 0 and not skip[name] then
+            if (tonumber(have[name]) or 0) < want then
+                return name
+            end
+        end
+    end
+    return nil
+end
+
+--- Drop unobtainable ids from the shot package.
+function planner.filterObtainable(wants, order, skip)
+    wants = wants or {}
+    order = order or {}
+    skip = skip or {}
+    local w2, o2 = {}, {}
+    for i = 1, #order do
+        local name = order[i]
+        local want = tonumber(wants[name]) or 0
+        if want > 0 and not skip[name] then
+            w2[name] = want
+            o2[#o2 + 1] = name
+        end
+    end
+    return w2, o2
+end
+
+--- Human list of skipped package names (for status lines).
+function planner.skippedNames(order, skip)
+    order = order or {}
+    skip = skip or {}
+    local out = {}
+    for i = 1, #order do
+        local name = order[i]
+        if skip[name] then
+            out[#out + 1] = name
+        end
+    end
+    return out
 end
 
 --- Fire when the package is in the loaders, or every loader is slot-full.
