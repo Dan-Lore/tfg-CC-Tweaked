@@ -391,28 +391,38 @@ local function ingestItemRow(into, it)
     }
 end
 
---- Watchlist ME pass: per-id getItem + one crafting-tasks list.
--- Never calls listItems (full ME dump is multi-second on large nets and was the poll stall).
--- Returns { amount, craftable, crafting, craftKnown, ms, mode }.
-function ae_bridge.snapshot(bridge, names)
+--- Watchlist ME pass: crafting tasks first, then per-id getItem.
+-- opts.yield: sleep(0) between getItems so a parallel UI coroutine can paint mid-scan.
+-- opts.base: previous snapshot to copy amounts for names not in opts.focus.
+-- opts.focus: optional name list to refresh; others kept from base (fast partial).
+-- Never calls listItems (full ME dump stalls large nets).
+function ae_bridge.snapshot(bridge, names, opts)
+    opts = opts or {}
     local t0 = os.clock()
     local amount, craftable, crafting, craftKnown = {}, {}, {}, {}
     names = names or {}
+    local base = opts.base
+    local focus = opts.focus
+    local focusSet = nil
+    if type(focus) == "table" and #focus > 0 then
+        focusSet = {}
+        for i = 1, #focus do
+            focusSet[focus[i]] = true
+        end
+    end
+
     for i = 1, #names do
         local n = names[i]
         amount[n] = 0
         crafting[n] = 0
         craftKnown[n] = true
+        if base and base.amount and (not focusSet or not focusSet[n]) then
+            amount[n] = tonumber(base.amount[n]) or 0
+            craftable[n] = base.craftable and base.craftable[n] or nil
+        end
     end
 
-    -- getItem only — ~N bridge calls for the watchlist, not the whole network.
-    for i = 1, #names do
-        local n = names[i]
-        local info = ae_bridge.getItemInfo(bridge, n)
-        amount[n] = info.amount
-        craftable[n] = info.craftable
-    end
-
+    -- Crafting jobs first (one call) — UI can show Крафт before stock scan finishes.
     local tasks = callList(bridge, "getCraftingTasks")
     if type(tasks) ~= "table" then
         tasks = callList(bridge, "listCraftingJobs")
@@ -448,9 +458,23 @@ function ae_bridge.snapshot(bridge, names)
     else
         for i = 1, #names do
             local n = names[i]
-            if ae_bridge.isItemCrafting(bridge, n) then
+            if (not focusSet or focusSet[n]) and ae_bridge.isItemCrafting(bridge, n) then
                 craftKnown[n] = false
             end
+        end
+    end
+
+    local scan = focusSet and focus or names
+    if not scan then
+        scan = names
+    end
+    for i = 1, #scan do
+        local n = scan[i]
+        local info = ae_bridge.getItemInfo(bridge, n)
+        amount[n] = info.amount
+        craftable[n] = info.craftable
+        if opts.yield and (i % 2 == 0) then
+            sleep(0)
         end
     end
 
@@ -460,7 +484,7 @@ function ae_bridge.snapshot(bridge, names)
         crafting = crafting,
         craftKnown = craftKnown,
         ms = math.floor((os.clock() - t0) * 1000 + 0.5),
-        mode = "getItem",
+        mode = focusSet and "focus" or "getItem",
     }
 end
 
@@ -525,38 +549,25 @@ function ae_bridge.craftItem(bridge, name, count)
         return interpretCraftReturn(a, b)
     end
 
-    -- Prefer a modest first job so multi-step patterns (plate ← gem ← ore) can start.
-    local tryOrder = {}
-    if count > 64 then
-        tryOrder[#tryOrder + 1] = 64
-    end
-    if count > 16 and count ~= 64 then
-        tryOrder[#tryOrder + 1] = 16
-    end
-    tryOrder[#tryOrder + 1] = count
-    if count > 1 then
-        tryOrder[#tryOrder + 1] = 1
-    end
-    -- Dedup while preserving order.
-    local seen, order = {}, {}
-    for i = 1, #tryOrder do
-        local n = tryOrder[i]
-        if not seen[n] then
+    -- Prefer the full ask (AE handles 1000+ fine); fall back to 256/64/16/1 if needed.
+    local raw = { count, 256, 64, 16, 1 }
+    local seen, tryOrder = {}, {}
+    for i = 1, #raw do
+        local n = raw[i]
+        if n and n >= 1 and n <= count and not seen[n] then
             seen[n] = true
-            order[#order + 1] = n
+            tryOrder[#tryOrder + 1] = n
         end
     end
 
     local err = "craft failed"
-    for i = 1, #order do
-        local n = order[i]
+    for i = 1, #tryOrder do
+        local n = tryOrder[i]
         local ok, why = once(n)
         if ok then
-            -- AP sometimes returns true without scheduling — confirm a job exists.
             if ae_bridge.hasCraftJob(bridge, name) then
                 return true, nil, n
             end
-            -- Brief yield then re-check (CPU may take a tick to register).
             sleep(0)
             if ae_bridge.hasCraftJob(bridge, name) then
                 return true, nil, n
@@ -564,7 +575,12 @@ function ae_bridge.craftItem(bridge, name, count)
             err = "API ok, no AE job"
         else
             err = why or err
+            -- Hard reject — no point trying smaller sizes.
+            if why == "not craftable" or why == "ITEM_NOT_FOUND" then
+                return false, err, 0
+            end
         end
+        sleep(0) -- let UI / aeWatch run between attempts
     end
     return false, err, 0
 end

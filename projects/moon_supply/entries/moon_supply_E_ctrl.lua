@@ -45,11 +45,16 @@ local lastCfgAt = 0
 local lastFullAeAt = 0
 local lastSnap = nil -- latest ae_bridge.snapshot (shared by UI + crafts)
 local uiDebugLog = {} -- ring under the table
+local packageOrder = nil -- active shot item ids (aeWatch focuses these)
+local packageWants = nil
+local aeWatchGeneration = 0 -- bumped so watch loop drops stale work
 local CRAFT_PENDING_S = 180
 local CRAFT_GRACE_S = 15
 local UI_PAINT_S = 0.15
 local CFG_RELOAD_S = 2
 local AE_FULL_S = 2
+local AE_WATCH_S = 0.6
+local CRAFT_RETRY_S = 2
 local DEBUG_LOG_N = 4
 
 local function setStatusLines(a, b, c)
@@ -283,6 +288,8 @@ local function stagedCounts()
 end
 
 --- Local craft reserve. Prefer snapshot craftingAmt/craftKnown (no per-id AE call).
+-- Grace is short (~2s) for "job not visible yet"; do not keep reserve for the full
+-- 15s after AE already finished — that inflated Крафт and blocked wait-collapse.
 local function pendingCover(name, now, craftingAmt, craftKnown)
     local p = craftPending[name]
     if not p then
@@ -300,8 +307,10 @@ local function pendingCover(name, now, craftingAmt, craftKnown)
         and ae_bridge.isItemCrafting(bridge, name) then
         return tonumber(p.count) or 0
     end
-    -- AE may still be calculating; keep the reserve through the grace window.
-    if now < (tonumber(p.grace) or 0) then
+    -- Brief settle only: AE may take a tick to register the job after craftItem.
+    local orderedAt = (tonumber(p.grace) or 0) - CRAFT_GRACE_S
+    local age = now - orderedAt
+    if age < 2 then
         return tonumber(p.count) or 0
     end
     craftPending[name] = nil
@@ -327,9 +336,10 @@ end
 
 --- Patch status fields in place. Never replaces uiRows (stable list for the monitor).
 -- assessRows: optional planner.assess output (moon/target/zone). nil → leave moon fields.
--- opts.light: only refresh staged (tight export loop) — no AE round-trip.
--- Full refresh uses one ae_bridge.snapshot (getItem×watchlist), then applies all rows
--- without yielding so the UI never paints a half-updated table.
+-- opts.light: only refresh staged — no AE round-trip.
+-- opts.snap / opts.reuse: apply existing snapshot (aeWatch owns full scans).
+-- opts.focus: partial AE refresh for active package ids.
+-- opts.yield: sleep(0) during getItem so UI paints mid-scan (default true).
 local function updateUiStatuses(assessRows, earthBridge, opts)
     opts = opts or {}
     ensureUiSkeleton()
@@ -345,16 +355,35 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
     local now = os.clock()
     local light = opts.light == true
 
-    local snap = nil
-    if not light and earthBridge then
-        local names = {}
-        for i = 1, #uiRows do
-            names[i] = uiRows[i].name
+    -- light = no AE peripheral calls, but still apply lastSnap so Земля/Крафт
+    -- stay in sync with freshly counted «Загружено» (avoids stale earth after export).
+    local snap = opts.snap
+    if not snap then
+        if (light or opts.reuse) and lastSnap then
+            snap = lastSnap
+        elseif not light and earthBridge then
+            local names = {}
+            for i = 1, #uiRows do
+                names[i] = uiRows[i].name
+            end
+            snap = ae_bridge.snapshot(earthBridge, names, {
+                yield = opts.yield ~= false,
+                focus = opts.focus,
+                base = lastSnap,
+            })
+            lastSnap = snap
+            lastFullAeAt = now
+            dbg(("AE snap %dms n=%d %s"):format(
+                tonumber(snap.ms) or 0,
+                #names,
+                tostring(snap.mode or "")
+            ))
         end
-        snap = ae_bridge.snapshot(earthBridge, names)
+    end
+    if snap and not light then
         lastSnap = snap
-        lastFullAeAt = now
-        dbg(("AE snap %dms n=%d"):format(tonumber(snap.ms) or 0, #names))
+    elseif snap and light then
+        -- keep lastSnap pointer; amounts already there
     end
 
     -- Stage patches first, then commit — one coherent frame.
@@ -456,23 +485,50 @@ local function describeShortItem(name, want, stagedMap)
     return ("ждём %s %d/%d"):format(label, staged, want)
 end
 
+--- True only while AE still has a job (or ~2s post-order before the job appears).
+-- Sticky craftStatus="req" / long craftPending must NOT keep the 60s wait alive
+-- after the CPU already finished — that was the «крафт давно закончился» hang.
 local function anyActiveCraft(order)
     order = order or {}
+    local now = os.clock()
     for i = 1, #order do
         local name = order[i]
         local row = rowByName(name)
         if row and (tonumber(row.crafting) or 0) > 0 then
             return true
         end
-        if craftStatus[name] == "req" then
-            return true
-        end
         local p = craftPending[name]
-        if p and os.clock() <= (tonumber(p.expires) or 0) then
-            return true
+        if p then
+            local orderedAt = (tonumber(p.grace) or 0) - CRAFT_GRACE_S
+            if (now - orderedAt) < 2 then
+                return true
+            end
         end
     end
     return false
+end
+
+--- Clear sticky «req» / pending when the AE job is gone so wait/status can move on.
+local function clearFinishedCraftFlags(order)
+    order = order or {}
+    local now = os.clock()
+    for i = 1, #order do
+        local name = order[i]
+        local row = rowByName(name)
+        local crafting = row and (tonumber(row.crafting) or 0) or 0
+        if crafting < 1 then
+            local p = craftPending[name]
+            if p then
+                local orderedAt = (tonumber(p.grace) or 0) - CRAFT_GRACE_S
+                if (now - orderedAt) >= 2 then
+                    craftPending[name] = nil
+                end
+            end
+            if craftStatus[name] == "req" and not craftPending[name] then
+                craftStatus[name] = nil
+            end
+        end
+    end
 end
 
 --- Build the 2 sys status lines from live package state (replaces dead «ожидание AE»).
@@ -549,6 +605,44 @@ local function snapshotLoaders()
     end
 end
 
+--- Background AE watch: keeps Земля/Крафт live while control exports / crafts / sleeps.
+-- Must be declared AFTER snapshotLoaders (Lua local upvalue would otherwise be nil →
+-- «AE watch err: …:attempt to call nil»).
+local function aeWatchLoop()
+    local fullEvery = 0
+    while true do
+        local gen = aeWatchGeneration
+        if bridge and #uiRows > 0 then
+            local ok, err = pcall(function()
+                local names = {}
+                for i = 1, #uiRows do
+                    names[i] = uiRows[i].name
+                end
+                fullEvery = fullEvery + 1
+                local focus = packageOrder
+                local useFocus = focus and #focus > 0 and fullEvery % 4 ~= 0 and lastSnap ~= nil
+                local snap = ae_bridge.snapshot(bridge, names, {
+                    yield = true,
+                    focus = useFocus and focus or nil,
+                    base = lastSnap,
+                })
+                if gen ~= aeWatchGeneration then
+                    return
+                end
+                lastSnap = snap
+                lastFullAeAt = os.clock()
+                updateUiStatuses(nil, nil, { snap = snap })
+                snapshotLoaders()
+                dbg(("AE watch %dms %s"):format(tonumber(snap.ms) or 0, tostring(snap.mode)))
+            end)
+            if not ok then
+                dbg("AE watch err: " .. tostring(err))
+            end
+        end
+        sleep(AE_WATCH_S)
+    end
+end
+
 --- Paint from shared state only (no AE). Safe to call from the UI coroutine.
 local function drawUi()
     if not mon then
@@ -618,14 +712,15 @@ local function drawUi()
     })
 end
 
---- Order AE crafts from an existing snapshot (no per-id getItem/craftingAmount).
+--- Order AE crafts for every short package item in one pass (parallel jobs on AE CPUs).
+-- Uses snapshot crafting counts so we do not double-order; updates snap locally after each OK.
 -- Returns lastOrderLine or nil for status band.
 local function requestCrafts(wants, order, force, snap)
     if not bridge then
         return nil
     end
     local now = os.clock()
-    if not force and (now - lastCraftAt) < 5 then
+    if not force and (now - lastCraftAt) < CRAFT_RETRY_S then
         return nil
     end
     lastCraftAt = now
@@ -635,8 +730,9 @@ local function requestCrafts(wants, order, force, snap)
         for i = 1, #order do
             names[i] = order[i]
         end
-        snap = ae_bridge.snapshot(bridge, names)
+        snap = ae_bridge.snapshot(bridge, names, { yield = true, focus = order, base = lastSnap })
         lastSnap = snap
+        lastFullAeAt = now
         dbg(("AE snap(craft) %dms"):format(tonumber(snap.ms) or 0))
     end
     local staged, buf = stagedCounts()
@@ -658,9 +754,7 @@ local function requestCrafts(wants, order, force, snap)
                 local missing = need - have - countOf(staged, name) - countOf(buf, name)
                     - crafting - reserved
                 if missing > 0 then
-                    -- getItem.isCraftable=false is common for multi-step patterns (plate←gem)
-                    -- even when a terminal craft works — never hard-skip on that flag alone.
-                    -- AE expands the full recipe tree when craftItem(final) is accepted.
+                    -- getItem.isCraftable=false is common for multi-step patterns (plate←gem).
                     local why = "try"
                     if craftable == true then
                         why = "getItem"
@@ -669,28 +763,47 @@ local function requestCrafts(wants, order, force, snap)
                         if okProbe then
                             why = probeWhy or "probe"
                         elseif probeWhy == "not craftable" or probeWhy == "ITEM_NOT_FOUND" then
-                            -- Still try craftItem once; only mark «Нет в AE» if verify fails too.
                             why = "try:" .. tostring(probeWhy)
                         end
                     end
-                    local ok, err, scheduled = ae_bridge.craftItem(bridge, name, missing)
-                    scheduled = tonumber(scheduled) or 0
-                    if ok and scheduled > 0 then
-                        craftStatus[name] = "req"
+                    -- Top up until the deficit is covered or AE refuses (may schedule 1000+).
+                    local scheduledTotal = 0
+                    local lastErr = nil
+                    while missing > 0 do
+                        local ok, err, scheduled = ae_bridge.craftItem(bridge, name, missing)
+                        scheduled = tonumber(scheduled) or 0
+                        if not ok or scheduled < 1 then
+                            lastErr = err
+                            break
+                        end
                         noteCraftPending(name, scheduled, now)
+                        scheduledTotal = scheduledTotal + scheduled
+                        crafting = crafting + scheduled
+                        missing = missing - scheduled
+                        snap.crafting[name] = crafting
+                        if lastSnap and lastSnap.crafting then
+                            lastSnap.crafting[name] = crafting
+                        end
+                        sleep(0)
+                        -- One successful large job is enough this pass; watch will refresh.
+                        if scheduled >= 64 then
+                            break
+                        end
+                    end
+                    if scheduledTotal > 0 then
+                        craftStatus[name] = "req"
                         ordered = ordered + 1
                         lastOrderLine = "заказ AE: "
                             .. monitor_ui.itemLabel(name)
-                            .. (" ×%d"):format(scheduled)
+                            .. (" ×%d"):format(scheduledTotal)
                         dbg(lastOrderLine .. " (" .. tostring(why) .. ")")
                     else
-                        -- Do not fake «заказ принят» / skip the item when no CPU job exists.
                         craftStatus[name] = nil
                         lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
-                        dbg(lastOrderLine .. " " .. tostring(err or why or ""))
-                        if err and err ~= "API ok, no AE job" and err ~= "craft returned nil"
-                            and err ~= "not craftable" and err ~= "ITEM_NOT_FOUND" then
-                            setError(shortErr(name, err))
+                        dbg(lastOrderLine .. " " .. tostring(lastErr or why or ""))
+                        if lastErr and lastErr ~= "API ok, no AE job" and lastErr ~= "craft returned nil"
+                            and lastErr ~= "not craftable" and lastErr ~= "ITEM_NOT_FOUND" then
+                            setError(shortErr(name, lastErr))
                         end
                     end
                 else
@@ -702,9 +815,41 @@ local function requestCrafts(wants, order, force, snap)
                 end
             end
         end
+        sleep(0) -- yield so UI + aeWatch run between craftItem calls
     end
-    dbg(("crafts %dms ordered=%d"):format(math.floor((os.clock() - t0) * 1000 + 0.5), ordered))
+    dbg(("crafts %dms ordered=%d /%d"):format(
+        math.floor((os.clock() - t0) * 1000 + 0.5),
+        ordered,
+        #order
+    ))
     return lastOrderLine
+end
+
+--- Still missing stock/craft for the package (stay in shot loop instead of 19s Moon poll).
+local function packageNeedsCraft(wants, order, stagedMap, snap)
+    snap = snap or lastSnap
+    stagedMap = stagedMap or {}
+    for i = 1, #order do
+        local name = order[i]
+        local want = tonumber(wants[name]) or 0
+        if want > 0 and craftStatus[name] ~= "no" then
+            local staged = countOf(stagedMap, name)
+            local earth = 0
+            local crafting = 0
+            if snap then
+                earth = tonumber(snap.amount[name]) or 0
+                crafting = tonumber(snap.crafting[name]) or 0
+            else
+                local row = rowByName(name)
+                earth = row and tonumber(row.earth) or 0
+                crafting = row and tonumber(row.crafting) or 0
+            end
+            if staged + earth + crafting < want then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 --- Optional: drain a leftover buffer chest into loaders if one is configured.
@@ -868,9 +1013,11 @@ local function runShotCycle(rows, shotMode)
     -- New intentional load cycle — stop showing «Отправлено».
     uiSentFreeze = false
     craftStatus = {}
-    updateUiStatuses(rows, bridge)
+    packageWants, packageOrder = wants, order
+    aeWatchGeneration = aeWatchGeneration + 1
+    updateUiStatuses(rows, bridge, { reuse = true, focus = order })
     local lastOrderLine = requestCrafts(wants, order, true, lastSnap)
-    updateUiStatuses(rows, bridge) -- refresh crafting flags after orders
+    updateUiStatuses(rows, bridge, { reuse = true }) -- craft flags after orders
     snapshotLoaders()
 
     local skip = unavailableSkip()
@@ -884,8 +1031,11 @@ local function runShotCycle(rows, shotMode)
         uiWaitName = nil
         setStatusLines(formatSkipStatus(skipNames) or "нечего отправить")
         dbg("shot abort: нечего отправить")
+        packageWants, packageOrder = nil, nil
         return
     end
+
+    packageWants, packageOrder = wants, order
 
     -- Full craft-wait only when AE jobs are actually needed; otherwise short export settle.
     local waitS = planner.craftWaitSeconds(cfg, shotMode)
@@ -919,6 +1069,7 @@ local function runShotCycle(rows, shotMode)
             phase = "poll"
             uiTimerEnd = nil
             uiWaitName = nil
+            packageWants, packageOrder = nil, nil
             clearStatusLines()
             dbg("cfg watchlist changed — abort shot")
             return
@@ -929,50 +1080,62 @@ local function runShotCycle(rows, shotMode)
             if not bridge then
                 setError("нет ME-моста")
                 uiWaitName = nil
+                packageWants, packageOrder = nil, nil
                 clearStatusLines()
                 return
             end
         end
 
         local now = os.clock()
-        -- Collapse dead craft-wait: no jobs and Earth has stock → stop pretending we wait on AE.
+        clearFinishedCraftFlags(order)
+        -- Collapse craft-wait as soon as AE CPUs are idle (craft finished / never started).
+        -- Old logic required craftStatus clear + earth>0; sticky «req» kept the full 60s timer.
         if now < waitDeadline and not anyActiveCraft(order) then
-            local canExport = false
-            for i = 1, #order do
-                local name = order[i]
-                local row = rowByName(name)
-                if row and (tonumber(row.earth) or 0) > 0 then
-                    canExport = true
-                    break
-                end
-            end
-            if canExport then
-                waitDeadline = now
-                dbg("wait collapse: есть склад, без крафта")
-            end
+            waitDeadline = now
+            dbg("wait collapse: AE idle")
         end
 
         local inCraftWait = now < waitDeadline
         if inCraftWait then
             phase = "craft_wait"
             uiTimerEnd = waitDeadline
-            lastOrderLine = requestCrafts(wants, order, false, lastSnap) or lastOrderLine
         else
             uiTimerEnd = nil
+        end
+
+        -- Keep topping up AE crafts after wait-collapse (was: only during craft_wait →
+        -- one ×64 then hang with «нет на Земле» while loaders held partial cargo).
+        if packageNeedsCraft(wants, order, select(1, stagedCounts()), lastSnap)
+            or inCraftWait then
+            lastOrderLine = requestCrafts(wants, order, false, lastSnap) or lastOrderLine
         end
 
         local tExp = os.clock()
         local okExport = exportAndPush(wants, order)
         dbg(("export %dms"):format(math.floor((os.clock() - tExp) * 1000 + 0.5)))
-        -- Staged every loop; full AE snapshot at most every AE_FULL_S (atomic apply).
-        local needFull = itemsChanged or (now - lastFullAeAt) >= AE_FULL_S
-        local staged, buf = updateUiStatuses(rows, bridge, needFull and {} or { light = true })
+        -- Staged every loop; reuse aeWatch snap (focus refresh only if stale).
+        local needFocus = itemsChanged or (now - lastFullAeAt) >= AE_FULL_S
+        local staged, buf = updateUiStatuses(
+            rows,
+            bridge,
+            needFocus and { reuse = true, focus = order } or { light = true }
+        )
+        clearFinishedCraftFlags(order)
+        -- After a fresh snap: if craft just finished, don't sit on the remainder of the 60s.
+        if now < waitDeadline and not anyActiveCraft(order) then
+            waitDeadline = now
+            inCraftWait = false
+            uiTimerEnd = nil
+            dbg("wait collapse: AE idle (post-snap)")
+        end
         skip = unavailableSkip()
         wants, order = planner.filterObtainable(wants, order, skip)
+        packageWants, packageOrder = wants, order
         if #order == 0 then
             phase = "idle"
             uiTimerEnd = nil
             uiWaitName = nil
+            packageWants, packageOrder = nil, nil
             setStatusLines(formatSkipStatus(planner.skippedNames(fullOrder, skip)) or "нечего отправить")
             return
         end
@@ -1016,6 +1179,7 @@ local function runShotCycle(rows, shotMode)
             if tryFire() then
                 uiWaitName = nil
                 clearStatusLines()
+                packageWants, packageOrder = nil, nil
                 dbg("fire ok → cooldown")
                 return
             end
@@ -1025,14 +1189,17 @@ local function runShotCycle(rows, shotMode)
                 phase = "poll"
                 uiTimerEnd = nil
                 uiWaitName = nil
+                packageWants, packageOrder = nil, nil
                 clearStatusLines()
                 return
             end
             local more = canLoadMore(wants, order, staged, buf, lastSnap)
-            if planner.shouldYield(inCraftWait, more, satisfied, full) then
+            local keepCrafting = packageNeedsCraft(wants, order, staged, lastSnap)
+            if planner.shouldYield(inCraftWait, more, satisfied, full, keepCrafting) then
                 phase = "poll"
                 uiTimerEnd = nil
                 uiWaitName = nil
+                packageWants, packageOrder = nil, nil
                 setStatusLines(
                     "пакет не собран — в опросе",
                     formatSkipStatus(planner.skippedNames(fullOrder, skip))
@@ -1042,7 +1209,7 @@ local function runShotCycle(rows, shotMode)
             end
         end
 
-        net_watch.sleepWatch(0.5, noteHotplug)
+        net_watch.sleepWatch(0.35, noteHotplug)
     end
 end
 
@@ -1071,7 +1238,7 @@ local function tick()
     if lastFireAt > 0 and (now - lastFireAt) < cfg.cooldown then
         phase = "cooldown"
         uiTimerEnd = lastFireAt + cfg.cooldown
-        -- Keep «Отправлено» counts live; do not flip to «Загрузка» (uiSentFreeze).
+        -- Keep «Отправлено» counts live; do not flip to «Загружено» (uiSentFreeze).
         updateUiStatuses(nil, bridge, { light = true })
         snapshotLoaders()
         return
@@ -1094,7 +1261,8 @@ local function tick()
 
     local rows, shotMode = planner.assess(cfg.items, stocks, cfg.red_frac)
     mode = shotMode
-    updateUiStatuses(rows, bridge)
+    -- Prefer aeWatch snap; only force a scan if watch is cold.
+    updateUiStatuses(rows, bridge, { reuse = true })
     snapshotLoaders()
     dbg(("poll %dms mode=%s"):format(
         math.floor((os.clock() - tTick) * 1000 + 0.5),
@@ -1104,6 +1272,7 @@ local function tick()
     if shotMode == planner.ZONE_OK then
         phase = "idle"
         uiWaitName = nil
+        packageWants, packageOrder = nil, nil
         clearStatusLines()
         return
     end
@@ -1146,5 +1315,5 @@ snapshotLoaders()
 ensureUiSkeleton()
 pcall(drawUi)
 
-print("moon_supply earth: parallel UI + control")
-parallel.waitForAny(controlLoop, uiLoop)
+print("moon_supply earth: parallel UI + AE watch + control")
+parallel.waitForAny(controlLoop, uiLoop, aeWatchLoop)

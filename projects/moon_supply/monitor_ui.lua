@@ -293,7 +293,7 @@ function monitor_ui.statusCell(row, phase, opts)
         return ("Крафт (%d)"):format(crafting), colors.yellow
     end
     if staged > 0 then
-        return ("Загрузка (%d)"):format(staged), colors.yellow
+        return ("Загружено (%d)"):format(staged), colors.yellow
     end
     if ae == "no" or ae == "fail" then
         return "Нет в AE", colors.red
@@ -522,7 +522,7 @@ function monitor_ui.draw(mon, state)
     local targetW = colWidth(headTarget, targets, 4)
     local earthW = colWidth(headEarth, earths, 5)
     -- Floor status width so short/long labels do not shift columns every paint.
-    local statusW = colWidth(headStatus, statuses, ulen("Отправлено (9999)"))
+    local statusW = colWidth(headStatus, statuses, ulen("Загружено (9999)"))
     -- Sticky widths: expand only, never shrink mid-session (column dance looks like rebuild).
     local layout = mon._moonSupplyLayout
     if not layout or layout.monW ~= w then

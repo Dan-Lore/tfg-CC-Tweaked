@@ -37,12 +37,12 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
    - **WARN** if no ALARM but any `moon < target`
    - **OK** → idle
 3. Build a shot package from deficits. Within a zone, cfg order. In **ALARM**, alarm items load before warn items of the same shot. **WARN** sends warn deficits only.
-4. Missing on Earth: try `craftItem` on the **final** item (AE expands multi-step trees itself — we do not order intermediates). Prefer chunk 64→16→full→1; API success must show a real CPU job (`hasCraftJob`), else treat as fail (AP often returns true/nil with no job). `getItem.isCraftable=false` is not a hard skip. In-flight jobs + local reserve are not double-ordered. Row status: `Крафт` / `Загрузка` / `Отправлено`.
+4. Missing on Earth: try `craftItem` on the **final** item (AE expands multi-step trees itself). Prefer full ask →256→64→16→1; verify CPU job. Keep topping up crafts after wait-collapse until the package deficit is covered. Row status: `Крафт` / `Загружено` / `Отправлено`.
 5. After the first craft probe, **unobtainable** ids are dropped from the shot. If nothing remains, **no craft-wait / no launch prep** — idle + status `не шлём (нет в AE): …`.
-6. During craft-wait (**ALARM 60 s** / **WARN 120 s**, or **3 s** if no AE jobs) only for obtainable items: export AE → loaders; re-request craft as needed. Title stays short (`сборка` / `загрузка`); status lines say `крафт AE` / `сборка пакета` / `выгрузка` / `нет на Земле` — never vague «ждём AE» when nothing was ordered. Debug ring (4 lines) under the table shows snap/export/craft timings.
+6. During craft-wait (**ALARM 60 s** / **WARN 120 s**, or **3 s** if no AE jobs) only for obtainable items: export AE → loaders; re-request craft as needed. **Collapse wait as soon as AE CPUs are idle** (sticky `req`/pending no longer holds the full timer after craft finishes). Title stays short (`сборка` / `загрузка`); status lines say `крафт AE` / `сборка пакета` / `выгрузка`. Debug ring under the table shows timings.
 7. **Fire** when the obtainable shot package sits in the loaders, or when every loader is cargo-full. `загрузка` title only when loaders actually hold cargo. If the package cannot be finished after the wait, return to poll with a status note.
 8. Pulse relay → `cooldown | 80`. Flight is 60 s, so the next poll sees the delivery. No in-flight reserve. A failed relay pulse does not start the cooldown.
-9. **Poll UX**: one `ae_bridge.snapshot` = `getItem`×watchlist + one crafting-tasks list (never full `listItems` — that stalled large ME nets). Rows apply atomically. Shot loop refreshes staged every 0.5 s; full AE at most every 2 s. Cfg hot-reload throttled to 2 s. `requestCrafts` reuses the snapshot (no N×`craftingAmount`).
+9. **Parallel runtime**: `uiLoop` + `aeWatchLoop` + `controlLoop`. Watch refreshes Земля/Крафт (~0.6 s; focus=active package, full every 4th). Control exports/crafts/fires without owning long AE scans. `requestCrafts` schedules **all** short package items in one pass (AE runs jobs in parallel on CPUs), accounts for in-flight crafting, retries every 2 s. Shot loop does **not** yield to the expensive Moon poll while `packageNeedsCraft`. Snapshot: crafting-tasks first, `getItem` with `sleep(0)` yields for live UI.
 
 ## Watchlist defaults (`moon_supply_E_ctrl.cfg` only)
 
@@ -81,7 +81,7 @@ Keep a Moon AE2 watchlist at target counts by exporting from Earth AE2 into the 
 - `railgun_hw.lua` — loader full + relay pulse (from legacy `railgun`)
 - `discover.lua` — bridge, modem, monitor, buffer, loaders, relay
 - `planner.lua` — ALARM/WARN, package, craft-wait policy
-- `monitor_ui.lua` — Earth status: Предмет/Луна/Цель red <25% / yellow <100% / green ≥100%; Земля white; Статус «Крафт (n)» / «Загрузка (n)» yellow, on cooldown «Отправлено (n)» yellow, «Нет в AE» red; header tracks craft + staged totals + blocking `wait_item`; **2 fixed sys/error lines**; sticky column widths; per-line paint cache; `setTextScale` once per monitor name. Row **order is fixed** (caller skeleton); draw does not re-sort
+- `monitor_ui.lua` — Earth status: Предмет/Луна/Цель red <25% / yellow <100% / green ≥100%; Земля white; Статус «Крафт (n)» / «Загружено (n)» yellow, on cooldown «Отправлено (n)» yellow, «Нет в AE» red; header tracks craft + staged totals; **2 fixed sys/error lines**; sticky column widths; per-line paint cache; `setTextScale` once per monitor name. Row **order is fixed** (caller skeleton); draw does not re-sort
 - Earth entry: `uiRows` skeleton from cfg.items (fingerprint); ticks only patch statuses. **Cfg hot-reload** each poll (`loadEarth`): watchlist fingerprint change rebuilds the skeleton; bridge/monitor/loaders/relay/buffer/modem change sets dirty rescan. Tunables (cooldown, craft_wait, red_frac, …) apply immediately. Parallel UI + control
 
 ## Deploy

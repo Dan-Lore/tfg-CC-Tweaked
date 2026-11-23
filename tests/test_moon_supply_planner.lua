@@ -139,6 +139,8 @@ A.suite("moon_supply planner", {
             A.eq(planner.shouldYield(false, false, true, false), false)
             A.eq(planner.shouldYield(false, false, false, true), false)
             A.eq(planner.shouldYield(false, false, false, false), true)
+            -- keepCrafting holds the shot loop so we can keep scheduling AE jobs.
+            A.eq(planner.shouldYield(false, false, false, false, true), false)
         end,
     },
     {
@@ -283,7 +285,7 @@ A.suite("moon_supply ae craft cover", {
             local crafted, err, n = ae_bridge.craftItem(bridge, "minecraft:gold_ingot", 800)
             A.eq(crafted, true)
             A.isNil(err)
-            A.eq(n, 64)
+            A.eq(n, 800)
             local bad, badErr, badN = ae_bridge.craftItem(bridge, "gtceu:diamond_plate", 100)
             A.eq(bad, false)
             A.eq(badN, 0)
@@ -390,12 +392,12 @@ A.suite("moon_supply monitor", {
             A.eq(monitor_ui.stockColor(50, 100, "WARN"), colors.yellow)
             A.eq(monitor_ui.stockColor(100, 100, "OK"), colors.lime)
             local t, c = monitor_ui.statusCell({ staged = 12 })
-            A.eq(t, "Загрузка (12)")
+            A.eq(t, "Загружено (12)")
             A.eq(c, colors.yellow)
             t, c = monitor_ui.statusCell({ staged = 12 }, "cooldown")
             A.eq(t, "Отправлено (12)")
             A.eq(c, colors.yellow)
-            -- After cooldown ends, sent_freeze keeps «Отправлено» (not «Загрузка»).
+            -- After cooldown ends, sent_freeze keeps «Отправлено» (not «Загружено»).
             t, c = monitor_ui.statusCell({ staged = 12 }, "poll", { sent_freeze = true })
             A.eq(t, "Отправлено (12)")
             A.eq(c, colors.yellow)
@@ -474,7 +476,7 @@ A.suite("moon_supply monitor", {
             A.eq(cpEnd(head, "Цель"), cpEnd(row, "1024"))
             A.eq(cpEnd(head, "Земля"), cpEnd(row, "50960"))
             A.truthy(row:find("слиток алюминия", 1, true))
-            A.truthy(lines[7]:find("Загрузка (8)", 1, true))
+            A.truthy(lines[7]:find("Загружено (8)", 1, true))
             A.eq(monitor_ui.itemLabel("gtceu:ram_chip"), "ОЗУ")
             A.eq(monitor_ui.itemLabel("gtceu:cpu_chip"), "процессор")
             A.eq(monitor_ui.itemLabel("minecraft:gold_ingot"), "слиток золота")

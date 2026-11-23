@@ -164,12 +164,13 @@ function planner.shouldFire(packageDone, loadersFull)
 end
 
 --- Leave cargo in the loaders and poll again when the package cannot be finished.
--- Craft-wait and a ready gun stay in the shot loop.
-function planner.shouldYield(inCraftWait, canLoadMore, packageDone, loadersFull)
+-- Craft-wait, keepCrafting (still short + can order AE), and a ready gun stay in the shot loop.
+-- keepCrafting prevents the expensive full Moon poll while we should keep scheduling AE jobs.
+function planner.shouldYield(inCraftWait, canLoadMore, packageDone, loadersFull, keepCrafting)
     if packageDone or loadersFull then
         return false
     end
-    if inCraftWait then
+    if inCraftWait or keepCrafting then
         return false
     end
     return not canLoadMore
