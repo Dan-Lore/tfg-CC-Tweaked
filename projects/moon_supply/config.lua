@@ -61,6 +61,7 @@ local function emptyEarth()
         craft_wait_red = 60,
         craft_wait_green = 120,
         stock_timeout = 5,
+        ae_parallel = 8,
         moon_id = nil,
         items = copyDefaults(),
         _itemsFromCfg = false,
@@ -141,6 +142,8 @@ local function parseEarthLine(cfg, line, lineNo)
         setNumber(cfg, "craft_wait_green", val, lineNo, label)
     elseif key == "stock_timeout" then
         setNumber(cfg, "stock_timeout", val, lineNo, label)
+    elseif key == "ae_parallel" or key == "parallel" then
+        setNumber(cfg, "ae_parallel", val, lineNo, label)
     elseif key == "moon_id" or key == "host_id" then
         local n = tonumber(val)
         cfg.moon_id = n and math.floor(n) or nil
@@ -202,6 +205,13 @@ local function clampEarth(cfg)
     end
     if cfg.expected < 0 then
         cfg.expected = 0
+    end
+    cfg.ae_parallel = math.floor(cfg.ae_parallel)
+    if cfg.ae_parallel < 1 then
+        cfg.ae_parallel = 1
+    end
+    if cfg.ae_parallel > 16 then
+        cfg.ae_parallel = 16
     end
     cfg._itemsFromCfg = nil
     return cfg

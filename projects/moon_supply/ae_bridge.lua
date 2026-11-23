@@ -1,5 +1,7 @@
 -- Advanced Peripherals ME Bridge helpers (TFG AP ~0.7).
 
+local par = require("par")
+
 local ae_bridge = {}
 
 local function callList(bridge, method)
@@ -392,7 +394,8 @@ local function ingestItemRow(into, it)
 end
 
 --- Watchlist ME pass: crafting tasks first, then per-id getItem.
--- opts.yield: sleep(0) between getItems so a parallel UI coroutine can paint mid-scan.
+-- getItem runs on opts.width coroutines (default par.DEFAULT_WIDTH; 1 = sequential) so
+-- several main-thread calls share a tick. Each call already yields, so the UI keeps painting.
 -- opts.base: previous snapshot to copy amounts for names not in opts.focus.
 -- opts.focus: optional name list to refresh; others kept from base (fast partial).
 -- Never calls listItems (full ME dump stalls large nets).
@@ -468,15 +471,12 @@ function ae_bridge.snapshot(bridge, names, opts)
     if not scan then
         scan = names
     end
-    for i = 1, #scan do
+    par.each(#scan, function(i)
         local n = scan[i]
         local info = ae_bridge.getItemInfo(bridge, n)
         amount[n] = info.amount
         craftable[n] = info.craftable
-        if opts.yield and (i % 4 == 0) then
-            sleep(0)
-        end
-    end
+    end, opts.width)
 
     return {
         amount = amount,
@@ -571,13 +571,19 @@ function ae_bridge.hasCraftJob(bridge, name)
 end
 
 --- Request craft. Returns ok, errMessage, scheduledCount.
--- Schedules smaller chunks first (multi-step AE trees often reject huge first requests).
+-- Tries count →256→64→32→16→8→4→1 (multi-step AE trees often reject huge first requests).
 -- After a positive API return, verifies a craft job actually appeared.
-function ae_bridge.craftItem(bridge, name, count)
+-- opts.max: skip ladder sizes above max (max itself is tried first) — caller's hint
+-- after an earlier partial landed smaller, so known-ghost sizes are not re-tried.
+function ae_bridge.craftItem(bridge, name, count, opts)
     if not bridge or type(bridge.craftItem) ~= "function" then
         return false, "no craftItem", 0
     end
     count = math.max(1, math.floor(tonumber(count) or 1))
+    local cap = opts and tonumber(opts.max)
+    if cap then
+        cap = math.max(1, math.floor(cap))
+    end
 
     local function once(n)
         local filter = { name = name, count = n }
@@ -589,22 +595,29 @@ function ae_bridge.craftItem(bridge, name, count)
     end
 
     -- Prefer full ask; fall back so partial craft works (100 missing ingredients → 16 ok).
-    local raw = { count, 256, 64, 32, 16, 8, 4, 1 }
+    local first = count
+    if cap and cap < count then
+        first = cap
+    end
+    local raw = { first, 256, 64, 32, 16, 8, 4, 1 }
     local seen, tryOrder = {}, {}
     for i = 1, #raw do
         local n = raw[i]
-        if n and n >= 1 and n <= count and not seen[n] then
+        if n and n >= 1 and n <= first and not seen[n] then
             seen[n] = true
             tryOrder[#tryOrder + 1] = n
         end
     end
 
+    -- Fast check is one isItemCrafting call; full hasCraftJob (tasks list) only after the
+    -- one-tick settle. Every peripheral call already yields, so no extra sleep(0) per size.
+    local fastCheck = type(bridge.isItemCrafting) == "function" or type(bridge.isCrafting) == "function"
     local err = "craft failed"
     for i = 1, #tryOrder do
         local n = tryOrder[i]
         local ok, why = once(n)
         if ok then
-            if ae_bridge.hasCraftJob(bridge, name) then
+            if fastCheck and ae_bridge.isItemCrafting(bridge, name) then
                 return true, nil, n
             end
             sleep(0)
@@ -620,7 +633,6 @@ function ae_bridge.craftItem(bridge, name, count)
                 return false, err, 0
             end
         end
-        sleep(0) -- let UI / aeWatch run between attempts
     end
     return false, err, 0
 end

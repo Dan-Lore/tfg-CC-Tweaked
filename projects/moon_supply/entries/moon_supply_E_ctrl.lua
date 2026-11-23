@@ -62,10 +62,17 @@ local CRAFT_RETRY_S = 2
 local EXPORT_FAIL_COOLDOWN_S = 8
 local EXPORT_MAX_CALLS = 12
 local CRAFT_SOFT_COOLDOWN_S = 8
+local CRAFT_PASS_BUDGET_S = 4 -- wall-clock cap per requestCrafts pass; rest resumes next pass
+local LOADER_SCAN_S = 0.5 -- loader list() results shared by all loops for this long
 local DEBUG_LOG_N = 4
 local exportFailUntil = {} -- name -> os.clock when export may retry after a zero move
 local craftFailUntil = {} -- name -> os.clock soft-fail craft cooldown
-local craftSoftFails = {} -- name -> consecutive soft-fail count this shot
+local craftSizeHint = {} -- name -> last landed partial size this shot (ladder starts at 4×)
+local craftResumeAt = nil -- order id where a budget-truncated craft pass resumes
+local uiRowIndex = {} -- name -> uiRows entry
+local loaderState = nil -- railgun_hw.scan result (shared cache)
+local loaderDirtyAt = -1 -- os.clock of the last export that moved cargo
+local lastMergeMoonAt = -1 -- lastMoonAt already merged into the active package
 
 local function setStatusLines(a, b, c)
     -- Accept a list table or up to 3 string args (CC-safe, no table.unpack).
@@ -133,6 +140,10 @@ local function ensureUiSkeleton()
         }
     end
     uiRows = monitor_ui.sortRows(base)
+    uiRowIndex = {}
+    for i = 1, #uiRows do
+        uiRowIndex[uiRows[i].name] = uiRows[i]
+    end
     uiItemsSig = sig
     lastPaintKey = nil
     if mon then
@@ -181,8 +192,8 @@ local function reloadCfg(force)
     if itemsChanged then
         craftStatus = {}
         craftPending = {}
-        craftSoftFails = {}
         craftFailUntil = {}
+        craftSizeHint = {}
         ensureUiSkeleton()
         print(("moon_supply earth: watchlist reloaded (%d items)"):format(#cfg.items))
     else
@@ -238,6 +249,8 @@ end
 
 local function rescan(reason)
     net = discover.scanEarth(cfg)
+    railgun_hw.resetCache()
+    loaderState = nil
     bridge = nil
     if net.bridge then
         bridge = peripheral.wrap(net.bridge)
@@ -290,8 +303,31 @@ local function countOf(map, name)
     return tonumber(map and map[name]) or 0
 end
 
+local function aeWidth()
+    return tonumber(cfg.ae_parallel) or 8
+end
+
+--- Shared loader scan (one list() per loader, run in parallel). Reused by every loop for
+-- LOADER_SCAN_S; any scan started before the last cargo-moving export is stale.
+local function loaderScan()
+    local now = os.clock()
+    local st = loaderState
+    if st and st.at > loaderDirtyAt and (now - st.at) < LOADER_SCAN_S then
+        return st
+    end
+    st = railgun_hw.scan(net.loaders or {}, aeWidth())
+    if not loaderState or st.at >= loaderState.at then
+        loaderState = st
+    end
+    return st
+end
+
+local function invalidateLoaders()
+    loaderDirtyAt = os.clock()
+end
+
 local function stagedCounts()
-    local loaders = railgun_hw.cargoTotals(net.loaders)
+    local loaders = loaderScan().totals
     local buffer = {}
     if net.buffer and net.buffer ~= "" and peripheral.isPresent(net.buffer) then
         buffer = railgun_hw.cargoTotals({ net.buffer })
@@ -351,7 +387,6 @@ end
 -- opts.light: only refresh staged — no AE round-trip.
 -- opts.snap / opts.reuse: apply existing snapshot (aeWatch owns full scans).
 -- opts.focus: partial AE refresh for active package ids.
--- opts.yield: sleep(0) during getItem so UI paints mid-scan (default true).
 local function updateUiStatuses(assessRows, earthBridge, opts)
     opts = opts or {}
     ensureUiSkeleton()
@@ -379,7 +414,7 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
                 names[i] = uiRows[i].name
             end
             snap = ae_bridge.snapshot(earthBridge, names, {
-                yield = opts.yield ~= false,
+                width = aeWidth(),
                 focus = opts.focus,
                 base = lastSnap,
             })
@@ -443,14 +478,11 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
             craftingAmt = planner.effectiveCraft(craftingAmt, wantClamp, p.staged, earthAmt)
             p.crafting = craftingAmt
             p.earth = earthAmt
-            local craftable = snap.craftable[name]
+            -- Only a craft probe decides «Нет в AE»: getItem.isCraftable=false is common for
+            -- multi-step patterns, and painting it here fed unavailableSkip false skips.
             local ae = craftStatus[name]
             if ae == "ok" or ae == "req" then
                 ae = nil
-            elseif ae == "wait" or ae == "no" or ae == "fail" then
-                -- keep: wait → «AE мало»; no/fail → «Нет в AE»
-            elseif ae == nil and p.earth < 1 and craftable == false then
-                ae = "no"
             end
             p.ae = ae
         end
@@ -475,12 +507,7 @@ local function updateUiStatuses(assessRows, earthBridge, opts)
 end
 
 local function rowByName(name)
-    for i = 1, #uiRows do
-        if uiRows[i].name == name then
-            return uiRows[i]
-        end
-    end
-    return nil
+    return uiRowIndex[name]
 end
 
 --- Human status about why a package item is still short — never vague «ждём AE».
@@ -669,7 +696,7 @@ end
 local function snapshotLoaders()
     uiLoadersTotal = #(net.loaders or {})
     if uiLoadersTotal > 0 then
-        uiLoadersFull = select(1, railgun_hw.fillSnapshot(net.loaders))
+        uiLoadersFull = loaderScan().fullCount
     else
         uiLoadersFull = 0
     end
@@ -690,12 +717,12 @@ local function aeWatchLoop()
                 end
                 fullEvery = fullEvery + 1
                 local focus = packageOrder
-                -- Full watchlist getItem is ~2.5–3.8s; during a shot prefer focus.
-                -- Large watchlists (≥30): full scan every 12th pass; else every 8th.
+                -- Full watchlist getItem is the slow pass; during a shot prefer focus.
+                -- Large watchlists (≥30): full scan every 16th pass; else every 8th.
                 local fullEveryN = (#names >= 30) and 16 or 8
                 local useFocus = focus and #focus > 0 and fullEvery % fullEveryN ~= 0 and lastSnap ~= nil
                 local snap = ae_bridge.snapshot(bridge, names, {
-                    yield = true,
+                    width = aeWidth(),
                     focus = useFocus and focus or nil,
                     base = lastSnap,
                 })
@@ -771,7 +798,7 @@ local function drawUi()
     end
     local pulse = monitor_ui.phasePulseIndex(pulsePhase, now) or "-"
     local statusKey = table.concat(uiStatusLines, "/")
-    local key = table.concat({
+    local parts = {
         tostring(phase),
         tostring(mode),
         tostring(lastError),
@@ -789,10 +816,10 @@ local function drawUi()
         tostring(uiDebugLog[#uiDebugLog] or ""),
         -- Blink Крафт↔Загружено every 1s.
         tostring(math.floor(now) % 2),
-    }, "|")
+    }
     for i = 1, #uiRows do
         local r = uiRows[i]
-        key = key .. ";" .. tostring(r.name)
+        parts[#parts + 1] = tostring(r.name)
             .. "," .. tostring(r.moon)
             .. "," .. tostring(r.earth)
             .. "," .. tostring(r.crafting)
@@ -800,6 +827,7 @@ local function drawUi()
             .. "," .. tostring(r.ae or "-")
             .. "," .. tostring(r.zone)
     end
+    local key = table.concat(parts, "|")
     if key == lastPaintKey then
         return
     end
@@ -823,6 +851,9 @@ local function drawUi()
 end
 
 --- Order AE crafts for every short package item in one pass (parallel jobs on AE CPUs).
+-- One craftItem ladder per id per pass: a partial (16 of 128) becomes a live job and the
+-- remainder is ordered once that job is gone, instead of re-laddering in the same pass.
+-- Pass stops after CRAFT_PASS_BUDGET_S of AE work and resumes at that id next time.
 -- Uses snapshot crafting counts so we do not double-order; updates snap locally after each OK.
 -- Returns lastOrderLine or nil for status band.
 local function requestCrafts(wants, order, force, snap)
@@ -840,17 +871,32 @@ local function requestCrafts(wants, order, force, snap)
         for i = 1, #order do
             names[i] = order[i]
         end
-        snap = ae_bridge.snapshot(bridge, names, { yield = true, focus = order, base = lastSnap })
+        snap = ae_bridge.snapshot(bridge, names, { width = aeWidth(), focus = order, base = lastSnap })
         lastSnap = snap
         lastFullAeAt = now
         dbg(("AE snap(craft) %dms"):format(tonumber(snap.ms) or 0))
     end
     local staged, buf = stagedCounts()
     local t0 = os.clock()
-    local ordered = 0
+    local ordered, probed = 0, 0
     local lastOrderLine = nil
-    for i = 1, #order do
-        local name = order[i]
+    local start = 1
+    if craftResumeAt then
+        for i = 1, #order do
+            if order[i] == craftResumeAt then
+                start = i
+                break
+            end
+        end
+        craftResumeAt = nil
+    end
+    for k = 0, #order - 1 do
+        local name = order[((start - 1 + k) % #order) + 1]
+        if probed > 0 and (os.clock() - t0) >= CRAFT_PASS_BUDGET_S then
+            craftResumeAt = name
+            dbg("crafts budget → next: " .. monitor_ui.itemLabel(name))
+            break
+        end
         local need = tonumber(wants[name]) or 0
         local st0 = tostring(craftStatus[name] or "")
         local coolUntil = tonumber(craftFailUntil[name]) or 0
@@ -865,7 +911,6 @@ local function requestCrafts(wants, order, force, snap)
             reserved = planner.effectiveCraft(reserved, need, stagedHave + crafting, have)
             if have + stagedHave >= need then
                 craftStatus[name] = "ok"
-                craftSoftFails[name] = nil
                 craftFailUntil[name] = nil
             elseif crafting > 0 or reserved > 0 or not craftKnown then
                 -- Live AE job / pending — remember it; do not re-order or soft-fail.
@@ -873,71 +918,51 @@ local function requestCrafts(wants, order, force, snap)
             else
                 local missing = need - have - stagedHave - crafting - reserved
                 if missing > 0 then
-                    -- getItem.isCraftable=false is common for multi-step patterns (plate←gem).
-                    local why = "try"
-                    if craftable == true then
-                        why = "getItem"
-                    else
-                        local okProbe, probeWhy = ae_bridge.isItemCraftable(bridge, name, 1)
-                        if okProbe then
-                            why = probeWhy or "probe"
-                        elseif ae_bridge.isHardCraftFail(probeWhy) then
-                            why = "try:" .. tostring(probeWhy)
-                        end
-                    end
-                    -- Top up until the deficit is covered or AE refuses (may schedule 1000+).
-                    local scheduledTotal = 0
-                    local lastErr = nil
-                    while missing > 0 do
-                        local ok, err, scheduled = ae_bridge.craftItem(bridge, name, missing)
-                        scheduled = tonumber(scheduled) or 0
-                        if not ok or scheduled < 1 then
-                            lastErr = err
-                            break
-                        end
+                    -- getItem.isCraftable=false is common for multi-step patterns (plate←gem);
+                    -- craftItem itself is the probe.
+                    local why = craftable == true and "getItem" or "try"
+                    local hint = craftSizeHint[name]
+                    local ok, lastErr, scheduled = ae_bridge.craftItem(
+                        bridge, name, missing, hint and { max = hint * 4 } or nil)
+                    probed = probed + 1
+                    scheduled = tonumber(scheduled) or 0
+                    if ok and scheduled > 0 then
                         noteCraftPending(name, scheduled, now)
-                        scheduledTotal = scheduledTotal + scheduled
                         crafting = crafting + scheduled
-                        missing = missing - scheduled
                         snap.crafting[name] = crafting
                         if lastSnap and lastSnap.crafting then
                             lastSnap.crafting[name] = crafting
                         end
-                        sleep(0)
-                        -- One successful large job is enough this pass; watch will refresh.
-                        if scheduled >= 64 then
-                            break
-                        end
-                    end
-                    if scheduledTotal > 0 then
+                        craftSizeHint[name] = (scheduled < missing) and scheduled or nil
                         craftStatus[name] = "req"
-                        craftSoftFails[name] = nil
                         craftFailUntil[name] = nil
                         ordered = ordered + 1
                         lastOrderLine = "заказ AE: "
                             .. monitor_ui.itemLabel(name)
-                            .. (" ×%d"):format(scheduledTotal)
+                            .. (" ×%d"):format(scheduled)
                         dbg(lastOrderLine .. " (" .. tostring(why) .. ")")
+                    elseif ae_bridge.isHardCraftFail(lastErr) then
+                        craftStatus[name] = "no"
+                        lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
+                        dbg(lastOrderLine .. " " .. tostring(lastErr) .. " → skip")
+                    elseif ae_bridge.isSoftCraftFail(lastErr) then
+                        -- Partial sizes exhausted — not «Нет в AE»; cooldown and retry.
+                        craftStatus[name] = "wait"
+                        craftFailUntil[name] = now + CRAFT_SOFT_COOLDOWN_S
+                        lastOrderLine = "AE мало: " .. monitor_ui.itemLabel(name)
+                        dbg(lastOrderLine .. " " .. tostring(lastErr)
+                            .. (" cool %ds"):format(CRAFT_SOFT_COOLDOWN_S))
+                    elseif craftable == false then
+                        -- AE refused with an unclassified error and getItem has no pattern.
+                        craftStatus[name] = "no"
+                        lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
+                        dbg(lastOrderLine .. " " .. tostring(lastErr) .. " (no pattern) → skip")
                     else
-                        if ae_bridge.isHardCraftFail(lastErr) then
-                            craftStatus[name] = "no"
-                            lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
-                            dbg(lastOrderLine .. " " .. tostring(lastErr) .. " → skip")
-                        elseif ae_bridge.isSoftCraftFail(lastErr) then
-                            -- Partial sizes exhausted — not «Нет в AE»; cooldown and retry.
-                            craftStatus[name] = "wait"
-                            craftFailUntil[name] = now + CRAFT_SOFT_COOLDOWN_S
-                            craftSoftFails[name] = (tonumber(craftSoftFails[name]) or 0) + 1
-                            lastOrderLine = "AE мало: " .. monitor_ui.itemLabel(name)
-                            dbg(lastOrderLine .. " " .. tostring(lastErr)
-                                .. (" cool %ds"):format(CRAFT_SOFT_COOLDOWN_S))
-                        else
-                            craftStatus[name] = nil
-                            lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
-                            dbg(lastOrderLine .. " " .. tostring(lastErr or why or ""))
-                            if lastErr then
-                                setError(shortErr(name, lastErr))
-                            end
+                        craftStatus[name] = nil
+                        lastOrderLine = "AE не взял: " .. monitor_ui.itemLabel(name)
+                        dbg(lastOrderLine .. " " .. tostring(lastErr or why or ""))
+                        if lastErr then
+                            setError(shortErr(name, lastErr))
                         end
                     end
                 else
@@ -945,7 +970,6 @@ local function requestCrafts(wants, order, force, snap)
                 end
             end
         end
-        sleep(0) -- yield so UI + aeWatch run between craftItem calls
     end
     dbg(("crafts %dms ordered=%d /%d"):format(
         math.floor((os.clock() - t0) * 1000 + 0.5),
@@ -995,15 +1019,19 @@ local function pushBuffer(order)
         local n = countOf(buf, name)
         if n > 0 then
             transfer.toMany(net.buffer, net.loaders, name, n)
-        end
-        if i % 4 == 0 then
-            sleep(0)
+            invalidateLoaders()
         end
     end
 end
 
+-- nil = unknown; true once one exportItemToPeripheral moved >64; false if AP only takes ≤64.
+local exportBigOk = nil
+
 --- Export AE items straight into HV loaders (exportItemToPeripheral). Buffer optional.
 -- Only earth>0 ids; skip full loaders; budget EXPORT_MAX_CALLS to keep shot-loop responsive.
+-- Asks for the whole remainder per call (AP spreads it over free slots); a loader that took
+-- cargo and then refuses is only marked full once a later loader accepts the same item.
+-- Two refusals for one id → AE has none of it (no walk over every loader).
 local function exportAndPush(wants, order, skipMap)
     if not bridge then
         setError("нет ME-моста")
@@ -1015,7 +1043,11 @@ local function exportAndPush(wants, order, skipMap)
     end
     skipMap = skipMap or {}
     pushBuffer(order)
-    local staged = select(1, stagedCounts())
+    local scan = loaderScan()
+    local staged = {}
+    for k, v in pairs(scan.totals) do
+        staged[k] = v
+    end
     local snap = lastSnap
     local now = os.clock()
 
@@ -1023,12 +1055,11 @@ local function exportAndPush(wants, order, skipMap)
     local openLoaders = {}
     for i = 1, #net.loaders do
         local ln = net.loaders[i]
-        if peripheral.isPresent(ln) and not railgun_hw.loaderFull(ln) then
+        if scan.present[ln] and not scan.full[ln] then
             openLoaders[#openLoaders + 1] = ln
         end
     end
     if #openLoaders < 1 then
-        pushBuffer(order)
         return true
     end
 
@@ -1051,6 +1082,13 @@ local function exportAndPush(wants, order, skipMap)
     end
 
     local calls = 0
+    local li = 1 -- first loader not proven full this pass
+    local dead, touched = {}, {}
+    local anyMoved = false
+    local function exportOnce(name, ask, ln)
+        calls = calls + 1
+        return tonumber(ae_bridge.exportItemToPeripheral(bridge, name, ask, ln)) or 0
+    end
     for i = 1, #exportOrder do
         if calls >= EXPORT_MAX_CALLS then
             break
@@ -1063,26 +1101,54 @@ local function exportAndPush(wants, order, skipMap)
             local rem = (tonumber(wants[name]) or 0) - countOf(staged, name)
             local earth = tonumber(snap and snap.amount and snap.amount[name]) or 0
             rem = math.min(math.max(0, rem), math.max(0, earth))
-            local li = 1
-            local moved = 0
-            while rem > 0 and li <= #openLoaders and calls < EXPORT_MAX_CALLS do
-                local chunk = math.min(rem, 64)
-                local n = ae_bridge.exportItemToPeripheral(bridge, name, chunk, openLoaders[li])
-                calls = calls + 1
-                n = tonumber(n) or 0
-                if n > 0 then
-                    rem = rem - n
-                    moved = moved + n
-                    staged[name] = countOf(staged, name) + n
-                    if snap and snap.amount then
-                        snap.amount[name] = math.max(0, (tonumber(snap.amount[name]) or 0) - n)
-                    end
-                else
-                    li = li + 1
-                end
-                sleep(0)
+            while li <= #openLoaders and dead[openLoaders[li]] do
+                li = li + 1
             end
-            if rem > 0 and moved < 1 then
+            local k = li
+            local moved, misses = 0, 0
+            local suspect = nil -- touched loader that refused: full, or AE ran dry
+            while rem > 0 and k <= #openLoaders and calls < EXPORT_MAX_CALLS and misses < 2 do
+                local ln = openLoaders[k]
+                if dead[ln] then
+                    k = k + 1
+                else
+                    local ask = rem
+                    if exportBigOk == false and ask > 64 then
+                        ask = 64
+                    end
+                    local n = exportOnce(name, ask, ln)
+                    if n == 0 and ask > 64 and exportBigOk == nil and calls < EXPORT_MAX_CALLS then
+                        n = exportOnce(name, 64, ln)
+                        if n > 0 then
+                            exportBigOk = false
+                            dbg("export: AP cap 64/call")
+                        end
+                    elseif n > 64 then
+                        exportBigOk = true
+                    end
+                    if n > 0 then
+                        rem = rem - n
+                        moved = moved + n
+                        anyMoved = true
+                        touched[ln] = true
+                        staged[name] = countOf(staged, name) + n
+                        if snap and snap.amount then
+                            snap.amount[name] = math.max(0, (tonumber(snap.amount[name]) or 0) - n)
+                        end
+                        if suspect then
+                            dead[suspect] = true
+                            suspect = nil
+                        end
+                    else
+                        misses = misses + 1
+                        if touched[ln] and not suspect then
+                            suspect = ln
+                        end
+                        k = k + 1
+                    end
+                end
+            end
+            if rem > 0 and moved < 1 and misses > 0 then
                 if snap and snap.amount then
                     snap.amount[name] = 0
                 end
@@ -1092,7 +1158,9 @@ local function exportAndPush(wants, order, skipMap)
             end
         end
     end
-    pushBuffer(order)
+    if anyMoved then
+        invalidateLoaders()
+    end
     return true
 end
 
@@ -1174,9 +1242,11 @@ end
 --- Pull latest Moon assess into the in-flight package (gold etc. that dipped mid-craft).
 -- Returns wants, order, shotMode, grew.
 local function mergeMoonIntoPackage(wants, order, shotMode)
-    if not lastMoonStocks then
+    -- moonWatchLoop already painted these rows; only a new reply can change the package.
+    if not lastMoonStocks or lastMoonAt == lastMergeMoonAt then
         return wants, order, shotMode, false
     end
+    lastMergeMoonAt = lastMoonAt
     local rows, newMode = planner.assess(cfg.items, lastMoonStocks, cfg.red_frac)
     updateUiStatuses(rows, nil, { light = true })
     if newMode == planner.ZONE_ALARM then
@@ -1217,9 +1287,10 @@ local function runShotCycle(rows, shotMode)
         return
     end
 
-    local fullOrder = {}
+    local fullOrder, inFullOrder = {}, {}
     for i = 1, #order do
         fullOrder[i] = order[i]
+        inFullOrder[order[i]] = true
     end
 
     -- New intentional load cycle — stop showing «Отправлено».
@@ -1265,11 +1336,15 @@ local function runShotCycle(rows, shotMode)
         craftPending = keptPending
         exportFailUntil = {}
         craftFailUntil = {}
-        craftSoftFails = {}
+        craftSizeHint = {}
+        craftResumeAt = nil
     end
+    lastMergeMoonAt = lastMoonAt
     packageWants, packageOrder = wants, order
     aeWatchGeneration = aeWatchGeneration + 1
     updateUiStatuses(rows, bridge, { reuse = true, focus = order })
+    -- Stock already on Earth goes into the loaders before the (slower) craft ladders run.
+    exportAndPush(wants, order, {})
     local lastOrderLine = requestCrafts(wants, order, true, lastSnap)
     updateUiStatuses(rows, bridge, { reuse = true }) -- craft flags after orders
     snapshotLoaders()
@@ -1357,16 +1432,17 @@ local function runShotCycle(rows, shotMode)
             uiTimerEnd = nil
         end
 
+        -- Export first: craft ladders can take seconds and must not delay loading stock.
+        local tExp = os.clock()
+        local okExport = exportAndPush(wants, order, skip)
+        dbg(("export %dms"):format(math.floor((os.clock() - tExp) * 1000 + 0.5)))
+
         -- Keep topping up AE crafts after wait-collapse (was: only during craft_wait →
         -- one ×64 then hang with «нет на Земле» while loaders held partial cargo).
         if packageNeedsCraft(wants, order, select(1, stagedCounts()), lastSnap)
             or inCraftWait then
             lastOrderLine = requestCrafts(wants, order, false, lastSnap) or lastOrderLine
         end
-
-        local tExp = os.clock()
-        local okExport = exportAndPush(wants, order, skip)
-        dbg(("export %dms"):format(math.floor((os.clock() - tExp) * 1000 + 0.5)))
         -- Staged every loop; reuse aeWatch snap (focus refresh only if stale).
         local needFocus = itemsChanged or (now - lastFullAeAt) >= AE_FULL_S
         local staged, buf = updateUiStatuses(
@@ -1387,14 +1463,8 @@ local function runShotCycle(rows, shotMode)
         wants, order, shotMode, grew = mergeMoonIntoPackage(wants, order, shotMode)
         for i = 1, #order do
             local name = order[i]
-            local already = false
-            for j = 1, #fullOrder do
-                if fullOrder[j] == name then
-                    already = true
-                    break
-                end
-            end
-            if not already then
+            if not inFullOrder[name] then
+                inFullOrder[name] = true
                 fullOrder[#fullOrder + 1] = name
             end
         end
@@ -1417,7 +1487,7 @@ local function runShotCycle(rows, shotMode)
 
         local satisfied = planner.packageDone(wants, staged, skip)
         uiWaitName = satisfied and nil or planner.waitItem(wants, order, staged, skip)
-        local full = railgun_hw.allFull(net.loaders, cfg.expected)
+        local full = railgun_hw.scanAllFull(loaderScan(), net.loaders, cfg.expected)
         snapshotLoaders()
 
         local stagedTotal = 0

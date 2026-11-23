@@ -244,6 +244,101 @@ A.suite("moon_supply loader cargo", {
             stub.removePeripheral(name)
         end,
     },
+    {
+        name = "scan reads each loader once: totals + fill + allFull",
+        fn = function()
+            railgun_hw.resetCache()
+            local a, b, gone = "ld_scan_a", "ld_scan_b", "ld_scan_gone"
+            local listCalls, sizeCalls, detailCalls = 0, 0, 0
+            local function counted(slots, size)
+                local inv = loaderWith(slots, size)
+                local list0 = inv.list
+                function inv.list()
+                    listCalls = listCalls + 1
+                    return list0()
+                end
+                function inv.size()
+                    sizeCalls = sizeCalls + 1
+                    return size
+                end
+                function inv.getItemDetail()
+                    detailCalls = detailCalls + 1
+                    return nil
+                end
+                return inv
+            end
+            stub.addPeripheral(a, counted({
+                [1] = { name = "x", count = 64 },
+                [2] = { name = "gtceu:programmed_circuit", count = 1 },
+            }, 2))
+            stub.addPeripheral(b, counted({}, 4))
+            local loaders = { a, b }
+            local s = railgun_hw.scan(loaders, 1)
+            A.eq(s.totals.x, 64)
+            A.eq(s.full[a], true)
+            A.isNil(s.full[b])
+            A.eq(s.fullCount, 1)
+            A.eq(s.present[b], true)
+            A.eq(listCalls, 2)
+            A.eq(detailCalls, 0, "empty list() must not probe every slot")
+            A.eq(railgun_hw.scanAllFull(s, loaders, 2), false)
+            A.eq(railgun_hw.scanAllFull(s, { a }, 0), true)
+            A.eq(railgun_hw.scanAllFull(s, { a }, 2), false)
+            A.eq(railgun_hw.scanAllFull(s, { a, gone }, 0), false)
+            railgun_hw.scan(loaders, 1)
+            A.eq(sizeCalls, 2, "size() cached per loader name")
+            stub.removePeripheral(a)
+            stub.removePeripheral(b)
+            railgun_hw.resetCache()
+        end,
+    },
+})
+
+local par = require("par")
+
+A.suite("moon_supply par", {
+    {
+        name = "each runs every index sequentially without parallel",
+        fn = function()
+            local seen = {}
+            par.each(5, function(i)
+                seen[#seen + 1] = i
+            end, 8)
+            A.eq(#seen, 5)
+            A.eq(seen[5], 5)
+        end,
+    },
+    {
+        name = "each fans out over parallel.waitForAll and re-raises errors",
+        fn = function()
+            local saved = parallel
+            local workersRun = 0
+            parallel = {
+                waitForAll = function(...)
+                    local fns = { ... }
+                    workersRun = #fns
+                    for i = 1, #fns do
+                        fns[i]()
+                    end
+                end,
+            }
+            local hits = {}
+            par.each(10, function(i)
+                hits[i] = true
+            end, 3)
+            A.eq(workersRun, 3)
+            for i = 1, 10 do
+                A.truthy(hits[i])
+            end
+            local ok = pcall(par.each, 4, function(i)
+                if i == 2 then
+                    error("boom")
+                end
+            end, 2)
+            parallel = saved
+            A.eq(ok, false)
+        end,
+    },
 })
 
 local ae_bridge = require("ae_bridge")
@@ -297,6 +392,32 @@ A.suite("moon_supply ae craft cover", {
             A.eq(n, 16)
             A.truthy(#calls >= 2)
             A.eq(calls[1], 100)
+        end,
+    },
+    {
+        name = "craftItem max hint skips known-ghost large sizes",
+        fn = function()
+            local calls = {}
+            local jobs = {}
+            local bridge = {
+                craftItem = function(filter)
+                    calls[#calls + 1] = filter.count
+                    if filter.count <= 16 then
+                        jobs[filter.name] = true
+                    end
+                    return true
+                end,
+                isItemCrafting = function(filter)
+                    return jobs[filter.name] == true
+                end,
+            }
+            local ok, _, n = ae_bridge.craftItem(bridge, "a", 128, { max = 64 })
+            A.eq(ok, true)
+            A.eq(n, 16)
+            A.eq(calls[1], 64)
+            A.eq(calls[2], 32)
+            A.eq(calls[3], 16)
+            A.eq(#calls, 3)
         end,
     },
     {
