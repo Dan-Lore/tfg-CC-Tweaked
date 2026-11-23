@@ -508,7 +508,7 @@ function ae_bridge.isHardCraftFail(err)
     return false
 end
 
---- Soft rejects: API looked OK but no CPU job (or nil). Retry with cooldown, then skip.
+--- Soft rejects after all size attempts failed (ghost success / nil). Cooldown + retry; not «Нет в AE».
 function ae_bridge.isSoftCraftFail(err)
     err = tostring(err or "")
     if err == "" then
@@ -588,8 +588,8 @@ function ae_bridge.craftItem(bridge, name, count)
         return interpretCraftReturn(a, b)
     end
 
-    -- Prefer the full ask (AE handles 1000+ fine); fall back to 256/64/16/1 if needed.
-    local raw = { count, 256, 64, 16, 1 }
+    -- Prefer full ask; fall back so partial craft works (100 missing ingredients → 16 ok).
+    local raw = { count, 256, 64, 32, 16, 8, 4, 1 }
     local seen, tryOrder = {}, {}
     for i = 1, #raw do
         local n = raw[i]
@@ -611,8 +611,8 @@ function ae_bridge.craftItem(bridge, name, count)
             if ae_bridge.hasCraftJob(bridge, name) then
                 return true, nil, n
             end
-            -- Ghost success: smaller counts will not create a job either — stop here.
-            return false, "API ok, no AE job", 0
+            -- Ghost success at this size — try a smaller ask (partial craft).
+            err = "API ok, no AE job"
         else
             err = why or err
             -- Hard reject — no point trying smaller sizes.

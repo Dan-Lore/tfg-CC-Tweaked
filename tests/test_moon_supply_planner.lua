@@ -261,31 +261,42 @@ A.suite("moon_supply ae craft cover", {
         end,
     },
     {
-        name = "isSoftCraftFail and ghost craft stops size fallback",
+        name = "isSoftCraftFail and partial craft size fallback",
         fn = function()
             A.eq(ae_bridge.isSoftCraftFail("API ok, no AE job"), true)
             A.eq(ae_bridge.isSoftCraftFail("craft returned nil"), true)
             A.eq(ae_bridge.isSoftCraftFail("not craftable"), false)
             local calls = {}
+            local jobs = {}
             local bridge = {
                 craftItem = function(filter)
-                    calls[#calls + 1] = filter and filter.count
+                    local n = filter and filter.count
+                    calls[#calls + 1] = n
+                    -- Large asks ghost-succeed; <=16 actually schedule.
+                    if n and n <= 16 then
+                        jobs[filter.name] = true
+                    end
                     return true
                 end,
-                isItemCrafting = function()
-                    return false
+                isItemCrafting = function(filter)
+                    return jobs[filter and filter.name] == true
                 end,
                 getCraftingTasks = function()
-                    return {}
+                    local t = {}
+                    for name, on in pairs(jobs) do
+                        if on then
+                            t[#t + 1] = { name = name, count = 16 }
+                        end
+                    end
+                    return t
                 end,
             }
-            local ok, err, n = ae_bridge.craftItem(bridge, "gtceu:iv_emitter", 128)
-            A.eq(ok, false)
-            A.eq(n, 0)
-            A.eq(err, "API ok, no AE job")
-            -- Must not fall through 256/64/16/1 after ghost success.
-            A.eq(#calls, 1)
-            A.eq(calls[1], 128)
+            local ok, err, n = ae_bridge.craftItem(bridge, "gtceu:iv_sensor", 100)
+            A.eq(ok, true)
+            A.isNil(err)
+            A.eq(n, 16)
+            A.truthy(#calls >= 2)
+            A.eq(calls[1], 100)
         end,
     },
     {
@@ -503,6 +514,9 @@ A.suite("moon_supply monitor", {
             t, c = monitor_ui.statusCell({ ae = "no" })
             A.eq(t, "Нет в AE")
             A.eq(c, colors.red)
+            t, c = monitor_ui.statusCell({ ae = "wait" })
+            A.eq(t, "AE мало")
+            A.eq(c, colors.orange)
             t, c = monitor_ui.statusCell({})
             A.eq(t, "-")
             A.eq(c, colors.white)

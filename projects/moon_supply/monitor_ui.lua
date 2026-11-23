@@ -338,6 +338,9 @@ function monitor_ui.statusCell(row, phase, opts)
     if staged > 0 then
         return ("Загружено (%d)"):format(staged), colLoaded
     end
+    if ae == "wait" then
+        return "AE мало", colCraft
+    end
     if ae == "no" or ae == "fail" then
         return "Нет в AE", colors.red
     end
